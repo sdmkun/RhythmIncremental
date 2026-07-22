@@ -21,3 +21,5 @@ Thumbs.db
 # The tracked placeholders keep only the INSTALL.md guides.
 /addons/Project_DJ_Godot/*
 !/addons/Project_DJ_Godot/INSTALL.md
+
+/audio/loops/
