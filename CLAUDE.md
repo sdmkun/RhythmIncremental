@@ -51,6 +51,11 @@ The intended direction is bigger than the current prototype: skills should
     FX, and `PDJE_AI` (bundled Beat This ONNX model) extracts beat/downbeat
     timestamps from arbitrary audio. This maps almost 1:1 onto the genre-shift
     and realtime-FX pillars → [`docs/audio-design.md`](docs/audio-design.md).
+    **The `PDJE_AI` half is proven working** by `scenes/tools/beat_check.tscn`
+    (a standalone verification tool, not part of the game): both `DetectPCM`
+    and `DetectMusic` run, and the minimal DetectMusic init sequence is now
+    documented in `docs/audio-design.md`. Its accuracy turned out to be too
+    coarse for our own known-BPM loops — see `docs/decisions.md` Q-1.
   - **Judge/chart half — deferred.** Its Judge/Input modules expect charts
     authored through PDJE's own internal DB (`PDJE_EDITOR_ARG`, rail-id device
     mapping, per-frame `InputLine.emit_input_signal()` pumping); there is no

@@ -11,6 +11,9 @@ export_presets.cfg
 .mono/
 data_*/
 
+# PDJE writes its runtime log to <cwd>/logs/pdjeLog.txt
+/logs/
+
 # OS / editor cruft
 .DS_Store
 Thumbs.db

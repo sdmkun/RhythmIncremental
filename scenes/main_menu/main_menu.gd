@@ -46,6 +46,12 @@ func _ready() -> void:
 	tree.pressed.connect(func(): get_tree().change_scene_to_file("res://scenes/skill_tree/skill_tree.tscn"))
 	vb.add_child(tree)
 
+	var beat_check := Button.new()
+	beat_check.text = "🛠  Beat Check (tool)"
+	beat_check.custom_minimum_size = Vector2(0, 36)
+	beat_check.pressed.connect(func(): get_tree().change_scene_to_file("res://scenes/tools/beat_check.tscn"))
+	vb.add_child(beat_check)
+
 	var quit := Button.new()
 	quit.text = "Quit"
 	quit.pressed.connect(func(): get_tree().quit())

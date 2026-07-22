@@ -103,6 +103,103 @@ var result := detector.DetectPCM(interleaved_pcm, channels, sample_rate)
 > **【要検証】** エクスポート時は `.onnx` モデルと ONNX Runtime のDLL
 > （`onnxruntime.dll` / `onnxruntime_providers_shared.dll`）を同梱する必要がある。
 
+#### 実測結果【2026-07-22 検証済み】
+
+検証シーン `scenes/tools/beat_check.tscn`（仕様: [tasks/beatthis-check.md](tasks/beatthis-check.md)）で
+`audio/loops/` の6ループを実行。環境は Godot 4.7.1 / Windows / PDJE 0.9.2（wrapper 0.9.0）。
+再現コマンド:
+
+```
+Godot_v4.7.1-stable_win64_console.exe --headless --path . res://scenes/tools/beat_check.tscn
+```
+
+`CreateBeatThisDetector()` は同梱 `.onnx` の `res://` パスでそのまま通り、
+**DetectPCM / DetectMusic とも `result != null` かつ `beats` 非空**（正常な WAV では 6/6 成功）。
+API としては完全に動く。**問題は精度のほう。**
+
+| ループ | 長さ | 検出ビート数 | 推定BPM | ファイル名のBPM |
+| --- | ---: | ---: | ---: | ---: |
+| FL_BJ_174_Synth_Pad_Sonic_Gm | 11.0s | **1** | — | 174 |
+| SS_XLLRB_150_vocal_adlib_..._chop | 12.8s | 37 | 272.73 | 150 |
+| TSP_ENEIV2_175_kit_throwback_drum_E | 21.9s | 45 | 171.43 | 175 |
+| TSP_HLZ_174_drum_grace_shaker | 5.5s | 17 | 176.47 | 174 |
+| TSP_QUARTZ_174_drum_stalk_sequence_full | 2.8s | 5 | 120.00 | 174 |
+| shs_ins_180_kit_songstarter_loop_Rest_Fm | 21.3s | 23 | 77.92 | 180 |
+
+読み取れること:
+
+- **アタックの立つドラムループだけまとも。** それでも誤差 ±3 BPM 程度（後述の量子化が原因）。
+- **持続音（シンセパッド）はほぼ検出不能** — 11秒で1個しか返らない。
+- **ボーカルチョップはオンセットを拾ってしまう**（272 BPM = チョップの切れ目を拍と誤認）。
+- **短いループ（2.8s）は不安定** — 5個しか取れず BPM もダウンビートも当てにならない。
+  `audio-design.md` 前提の「4小節ループ」は 174 BPM なら約5.5秒なので、
+  **この用途はまさに Beat This が苦手な尺**。
+
+> **重要: タイムスタンプは 0.02 秒グリッドに量子化されている。**
+> 返る秒値はすべて 0.02 の倍数（Beat This の hop = 20ms）。
+> 174 BPM は 1拍 0.3448s なので 0.34 / 0.36 に丸められ、
+> `60 / 中央値` は 171.43 か 176.47 にしかならない。
+> **つまり検出値からは原理的に ±2% 程度の BPM 誤差が消せない。**
+> 既知BPMのループにビートグリッドが欲しいだけなら、計算で出すほうが常に正確。
+
+→ 使いどころの結論は [decisions.md](decisions.md#q-1-音源をどう調達するか-最重要未決定) の Q-1 追記を参照。
+
+#### PCM の渡し方【落とし穴・解決済み】
+
+Godot 4.4+ は `.wav` を既定で **QOA 圧縮**としてインポートする
+（`.import` の `compress/mode=2`）。したがって `AudioStreamWAV.data` は生 PCM ではなく、
+そのまま `DetectPCM()` に渡しても意味がない。
+
+**解決策: `FileAccess` で元の `.wav` を読み、RIFF を自前で解釈する。**
+`beat_check.gd::_parse_wav()` が PCM 8/16/24/32-bit と IEEE float 32/64-bit、
+および `WAVE_FORMAT_EXTENSIBLE`(0xFFFE) に対応済み。インポート設定に一切依存しない。
+sample_rate / channel_count もヘッダから正確に取れる。
+
+- `DetectPCM(pcm, channel_count, sample_rate)` の `pcm` は**インターリーブ**のまま渡してよい
+  （内部でモノにダウンミックスされる）。長さが `channel_count` で割り切れることだけ守る。
+- 再生用の `AudioStreamWAV` も**パース済み PCM から組み直す**と、検出した音と再生する音が
+  必ず一致する（QOA 往復を挟まない）。
+- 制約: `FileAccess` で元 `.wav` を読むので、**エクスポート後の pck には元ファイルが入らない**。
+  検証ツール専用の手法であり、本編で使うなら音源を `res://` の非インポート資産として
+  同梱するか、PDJE 側のデコーダ（= DetectMusic ルート）を使うこと。
+
+#### DetectMusic の最小手順【2026-07-22 確定】
+
+`DetectMusic()` は PDJE の DB に音源が登録されている必要がある。
+**`InitPlayer()` は不要**（登録だけで通ることを実行して確認した）。最小列は:
+
+```gdscript
+engine.InitEngine("user://pdje/rootdb")            # -> true
+if engine.SearchMusic(title, composer).is_empty():
+    engine.InitEditor(composer, "none", "user://pdje/editor")   # -> true
+    var editor = engine.GetEditor()
+    editor.ConfigNewMusic(title, composer, "res://audio/loops/x.wav")  # -> true
+    var arg := PDJE_EDITOR_ARG.new()               # 1行につき1個。使い回し禁止
+    arg.InitMusicArg(title, "174", 0, 0, 4)
+    editor.AddLine(arg)                            # -> true
+    editor.render("beatcheck_track")               # -> "RENDER COMPLETE"
+    editor.pushToRootDB(title, composer)           # -> true
+var result := detector.DetectMusic(engine, title, composer, bpm)
+```
+
+- `ConfigNewMusic()` は **`res://` パスをそのまま受け付ける**
+  （同梱サンプルは `G://YMCA.wav` のような絶対パスを渡しているが、絶対パス化は不要だった）。
+- DB は必ず `user://` に置く。サンプルの `res://rootdb` はエクスポート後に書き込めない。
+- **PDJE は `<cwd>/logs/pdjeLog.txt` にログを書く**（プロジェクトルートに `logs/` ができる）。
+  `.gitignore` 済み。
+- 結果は DetectPCM と**完全に一致**した（同じループで beats/downbeats とも同値）。
+  入力経路が独立しているのに一致するので、上の精度の限界は
+  PCM の作り方ではなく**モデルと後処理そのものの特性**と判断してよい。
+
+#### クリック再生の実測
+
+`beat_check.gd` は毎フレーム「再生位置が次のビート秒を跨いだか」で発火する素朴な方式。
+`--autoplay` 引数で全クリックのズレをログ出力して実測したところ、
+**ドリフトは +0〜6 ms**（60fps の1フレーム 16.7ms 未満）に収まった。検証用途には十分。
+再生位置は `Conductor` と同じ
+`get_playback_position() + AudioServer.get_time_since_last_mix() - output_latency`。
+より厳密にやるなら `AudioServer` 時刻基準の先読みスケジュールに置き換える。
+
 ## 音源をどう調達するか【未決定】
 
 ユーザー曰く「まだ決めていない。ループ音源ファイルを必要なだけ渡すことはできる。
