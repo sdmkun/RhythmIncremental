@@ -22,16 +22,24 @@ signal song_started
 signal song_finished
 
 var playing: bool = false
-var song_position: float = 0.0     # seconds since the chart's t=0
+var song_position: float = 0.0     # seconds since the chart's t=0, always rising
 var bpm: float = 120.0
 
 # Manual audio-output latency offset in seconds (tune per device / build).
 var output_latency: float = 0.0
 
+## Endless-loop support. When loop_length > 0 the stream is expected to repeat
+## forever, and song_position keeps counting past the loop point
+## (lap * loop_length + position within the lap) so charts can be laid out on a
+## single continuous timeline instead of a sawtooth.
+var loop_length: float = 0.0
+var loops_completed: int = 0
+
 var _player: AudioStreamPlayer
 var _time_began: float = 0.0
 var _length: float = 0.0
 var _has_stream: bool = false
+var _last_in_loop: float = 0.0
 
 
 func _ready() -> void:
@@ -44,9 +52,14 @@ func _ready() -> void:
 
 ## Start a song. `stream` may be null — the clock still runs so charts are
 ## fully playable/testable without any audio file present.
-func play_song(stream: AudioStream, start_bpm: float = 120.0) -> void:
+## Pass `song_loop_length` (seconds) for a looping stream: song_position then
+## keeps rising across laps instead of resetting at the loop point.
+func play_song(stream: AudioStream, start_bpm: float = 120.0, song_loop_length: float = 0.0) -> void:
 	bpm = start_bpm
 	song_position = 0.0
+	loop_length = maxf(song_loop_length, 0.0)
+	loops_completed = 0
+	_last_in_loop = 0.0
 	_has_stream = stream != null
 	if _has_stream:
 		_player.stream = stream
@@ -73,9 +86,19 @@ func _process(_delta: float) -> void:
 		return
 	if _has_stream and _player.playing:
 		# Prefer the audio driver's own playback position for accuracy.
-		song_position = _player.get_playback_position() \
+		var raw := _player.get_playback_position() \
 			+ AudioServer.get_time_since_last_mix() \
 			- output_latency
+		if loop_length > 0.0:
+			# get_playback_position() may or may not wrap on loop depending on
+			# the backend, so normalise, then count the laps ourselves.
+			var in_loop := fposmod(maxf(raw, 0.0), loop_length)
+			if in_loop < _last_in_loop - loop_length * 0.5:
+				loops_completed += 1
+			_last_in_loop = in_loop
+			song_position = loops_completed * loop_length + in_loop
+		else:
+			song_position = raw
 	else:
 		# No stream (or finished): fall back to a wall-clock estimate.
 		song_position = Time.get_ticks_usec() / 1_000_000.0 - _time_began - output_latency

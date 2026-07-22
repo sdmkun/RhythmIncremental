@@ -11,16 +11,23 @@ extends Control
 ## ClassDB (never as a global identifier) — the scene must stay parseable and
 ## runnable when the addon is missing.
 ##
+## It is also the chart authoring step: "Export chart" resolves the true BPM
+## (BeatGrid), snaps the detected beats to 16th notes and writes a looping
+## chart JSON into res://data/charts/ for scenes/rhythm/rhythm_game.gd.
+##
 ## Headless: run with `--headless` (or pass `--auto` after `--`) and the scene
 ## detects with both APIs, prints beat count / estimated BPM / first 8 beats,
 ## then quits. That covers acceptance criterion 3 without audio output.
 ## Pass `--autoplay` instead to detect one loop, play it on the real audio
 ## device and log the drift of every click, then quit — the trigger timing can
 ## be checked from stdout rather than by ear.
+## Pass `--export-chart` to detect every loop and write its chart JSON.
 
 const MODEL_PATH := "res://addons/Project_DJ_Godot/onnx_models/beat_this_model_final0.onnx"
 const LOOP_DIR := "res://audio/loops"
 const SFX_DIR := "res://audio/sfx"
+const CHART_DIR := "res://data/charts"
+const LANE_COUNT := 4
 
 # PDJE writes to these — never res://, which is read-only after export.
 const PDJE_DB_PATH := "user://pdje/rootdb"
@@ -36,23 +43,6 @@ const METRO_IDLE := Color("#2b2848")
 const METRO_BEAT := Color("#4ee1a0")
 const METRO_DOWNBEAT := Color("#ff7ad9")
 
-## Decoded WAV payload — we parse the file ourselves instead of going through
-## AudioStreamWAV because Godot 4.4+ imports .wav as QOA by default
-## (compress/mode=2), so `AudioStreamWAV.data` is not raw PCM.
-class WavPCM:
-	var ok: bool = false
-	var error: String = ""
-	var pcm: PackedFloat32Array = PackedFloat32Array()  # interleaved, [-1, 1]
-	var channels: int = 0
-	var sample_rate: int = 0
-	var frames: int = 0
-
-	func duration() -> float:
-		if sample_rate <= 0:
-			return 0.0
-		return float(frames) / float(sample_rate)
-
-
 var _loops: PackedStringArray = PackedStringArray()
 var _click_stream: AudioStream = null
 
@@ -65,6 +55,9 @@ var _wav: WavPCM = null
 var _beats: PackedFloat64Array = PackedFloat64Array()
 var _downbeats: PackedFloat64Array = PackedFloat64Array()
 var _loop_length: float = 0.0
+var _grid: Dictionary = {}                       # BeatGrid.resolve() result
+var _steps: PackedInt32Array = PackedInt32Array() # 16th-note indices of the chart
+var _source_path: String = ""
 
 var _music: AudioStreamPlayer
 var _clicks: Array[AudioStreamPlayer] = []
@@ -83,6 +76,7 @@ var _api_select: OptionButton
 var _detect_button: Button
 var _play_button: Button
 var _stop_button: Button
+var _export_button: Button
 var _status_label: RichTextLabel
 var _metronome: ColorRect
 var _beat_label: Label
@@ -176,6 +170,13 @@ func _build_ui() -> void:
 	_stop_button.pressed.connect(_on_stop_pressed)
 	buttons.add_child(_stop_button)
 
+	_export_button = Button.new()
+	_export_button.text = "Export chart"
+	_export_button.custom_minimum_size = Vector2(170, 40)
+	_export_button.disabled = true
+	_export_button.pressed.connect(_on_export_pressed)
+	buttons.add_child(_export_button)
+
 	var back := Button.new()
 	back.text = "← Menu"
 	back.custom_minimum_size = Vector2(120, 40)
@@ -262,10 +263,14 @@ func _detect(path: String, api: int) -> String:
 
 	_beats = PackedFloat64Array()
 	_downbeats = PackedFloat64Array()
+	_steps = PackedInt32Array()
+	_grid = {}
+	_source_path = path
 	_play_button.disabled = true
+	_export_button.disabled = true
 
 	# 1. Decode the WAV ourselves (needed for playback on both routes).
-	_wav = _parse_wav(path)
+	_wav = WavPCM.parse(path)
 	if not _wav.ok:
 		var parse_msg := "WAV parse failed: %s" % _wav.error
 		push_warning(parse_msg)
@@ -277,7 +282,7 @@ func _detect(path: String, api: int) -> String:
 	print(wav_line)
 	lines.append(wav_line)
 
-	_music.stream = _build_stream(_wav)
+	_music.stream = _wav.to_stream()
 
 	# 2. Model.
 	if not _pdje_available():
@@ -289,7 +294,8 @@ func _detect(path: String, api: int) -> String:
 	lines.append("[color=#4ee1a0]detector OK[/color] (%s)" % MODEL_PATH.get_file())
 
 	# 3. Detect.
-	var hint_bpm := _bpm_from_filename(path)
+	var candidates := BeatGrid.filename_bpm_candidates(path.get_file())
+	var hint_bpm := candidates[0] if not candidates.is_empty() else 0.0
 	var result: Object = null
 	if api == API_PCM:
 		result = _detect_pcm(_wav)
@@ -315,7 +321,7 @@ func _detect(path: String, api: int) -> String:
 		print(empty_msg)
 		return "\n".join(lines) + "\n[color=#ff6b6b]%s[/color]" % empty_msg
 
-	var est := _estimate_bpm(_beats)
+	var est := BeatGrid.estimate_bpm(_beats)
 	var hint_text := "%.0f" % hint_bpm if hint_bpm > 0.0 else "none"
 	print("beats=%d  downbeats=%d  estimated BPM=%.2f  (filename hint: %s)" % [
 		_beats.size(), _downbeats.size(), est, hint_text])
@@ -327,9 +333,89 @@ func _detect(path: String, api: int) -> String:
 	lines.append("estimated BPM: [b]%.2f[/b]   (filename hint: %s)" % [est, hint_text])
 	lines.append("first 8 beats: %s" % _format_times(_beats, 8))
 	lines.append("first 8 downbeats: %s" % _format_times(_downbeats, 8))
-	lines.append("Press Play — a click should land on every beat.")
+
+	# 4. Resolve the real BPM and snap the beats onto the 16th grid.
+	_grid = BeatGrid.resolve(path.get_file(), _loop_length, est)
+	_steps = BeatGrid.snap_to_steps(_beats, _grid["bpm"], _loop_length)
+	var step := BeatGrid.step_seconds(_grid["bpm"])
+	print("grid: BPM=%.3f (nominal %.0f, %s), bars=%d (raw %.3f), 1/16 = %.4f s, notes=%d" % [
+		_grid["bpm"], _grid["nominal_bpm"], _grid["note"],
+		_grid["bars"], _grid["bars_raw"], step, _steps.size()])
+	print("snapped drift: max %.1f ms, mean %.1f ms" % _snap_drift(step))
+	lines.append("[color=#4ee1a0]grid[/color] — BPM [b]%.3f[/b] (nominal %.0f) / [b]%d[/b] bars / 1-16th = %.4f s" % [
+		_grid["bpm"], _grid["nominal_bpm"], _grid["bars"], step])
+	lines.append("BPM source: %s" % _grid["note"])
+	lines.append("chart: [b]%d[/b] notes snapped to 16ths (drift max %.1f ms, mean %.1f ms)" % [
+		_steps.size(), _snap_drift(step)[0], _snap_drift(step)[1]])
+	lines.append("Press Play — a click should land on every beat. Export chart writes the JSON.")
 	_play_button.disabled = _music.stream == null
+	_export_button.disabled = _steps.is_empty()
 	return "\n".join(lines)
+
+
+## How far each detected beat had to move to reach its 16th slot — a sanity
+## check that the resolved BPM actually describes this loop.
+func _snap_drift(step: float) -> Array:
+	if step <= 0.0 or _beats.is_empty():
+		return [0.0, 0.0]
+	var worst := 0.0
+	var total := 0.0
+	for t in _beats:
+		var d: float = absf(float(t) - round(float(t) / step) * step) * 1000.0
+		worst = maxf(worst, d)
+		total += d
+	return [worst, total / float(_beats.size())]
+
+
+func _on_export_pressed() -> void:
+	_status(_export_chart())
+
+
+## Write the snapped grid out as a looping chart JSON for the rhythm scene.
+## Times stay in seconds (rhythm_game.gd's existing format) but the step index
+## and the exact grid metadata ride along so the chart can be rebuilt.
+func _export_chart() -> String:
+	if _steps.is_empty() or _wav == null or not _wav.ok:
+		return "[color=#ff6b6b]Nothing to export — run Detect first.[/color]"
+	var step := BeatGrid.step_seconds(_grid["bpm"])
+	var lanes := BeatGrid.assign_lanes(_steps, _source_path.get_file(), LANE_COUNT)
+	var notes: Array = []
+	for i in _steps.size():
+		notes.append({
+			"time": snappedf(_steps[i] * step, 0.000001),
+			"lane": lanes[i],
+			"step": _steps[i],
+		})
+
+	var chart := {
+		"title": _source_path.get_file().get_basename(),
+		"audio": _source_path,
+		"bpm": snappedf(_grid["bpm"], 0.001),
+		"nominal_bpm": _grid["nominal_bpm"],
+		"bars": _grid["bars"],
+		"loop": true,
+		"loop_length": snappedf(_loop_length, 0.000001),
+		"loop_frames": _wav.frames,
+		"sample_rate": _wav.sample_rate,
+		"steps_per_loop": _grid["bars"] * BeatGrid.BEATS_PER_BAR * BeatGrid.STEPS_PER_BEAT,
+		"_comment": "Generated by scenes/tools/beat_check.tscn: PDJE Beat This detection snapped to 16th notes. BPM resolved from the file name + the power-of-two bar count, not from detection. Regenerate with --export-chart.",
+		"notes": notes,
+	}
+
+	var out_path := "%s/%s.json" % [CHART_DIR, _source_path.get_file().get_basename()]
+	DirAccess.make_dir_recursive_absolute(CHART_DIR)
+	var f := FileAccess.open(out_path, FileAccess.WRITE)
+	if f == null:
+		var msg := "Cannot write %s (%s)" % [out_path, error_string(FileAccess.get_open_error())]
+		push_warning(msg)
+		print(msg)
+		return "[color=#ff6b6b]%s[/color]" % msg
+	f.store_string(JSON.stringify(chart, "  "))
+	f.close()
+	var ok_msg := "Wrote %s — %d notes, %.3f BPM, %d bars, loop %.4f s" % [
+		out_path, notes.size(), chart["bpm"], chart["bars"], _loop_length]
+	print(ok_msg)
+	return "[color=#4ee1a0]%s[/color]" % ok_msg
 
 
 func _create_detector() -> bool:
@@ -458,140 +544,6 @@ func _has_beats(result: Object) -> bool:
 	return not beats.is_empty()
 
 
-# ──────────────────────────────────────────────────────── WAV decoding ───────
-
-## Minimal RIFF/WAVE reader: PCM 8/16/24/32-bit and IEEE float 32/64-bit.
-## Reading the file straight off disk sidesteps Godot's QOA import, and gives us
-## the true sample rate / channel count from the header.
-func _parse_wav(path: String) -> WavPCM:
-	var out := WavPCM.new()
-	var f := FileAccess.open(path, FileAccess.READ)
-	if f == null:
-		out.error = "cannot open %s (%s)" % [path, error_string(FileAccess.get_open_error())]
-		return out
-
-	var size := int(f.get_length())
-	if size < 12 or f.get_buffer(4).get_string_from_ascii() != "RIFF":
-		out.error = "not a RIFF file"
-		return out
-	f.get_32()  # RIFF chunk size — unreliable, ignored
-	if f.get_buffer(4).get_string_from_ascii() != "WAVE":
-		out.error = "not a WAVE file"
-		return out
-
-	var audio_format := 0
-	var bits := 0
-	var data_offset := -1
-	var data_size := 0
-	while f.get_position() + 8 <= size:
-		var chunk_id := f.get_buffer(4).get_string_from_ascii()
-		var chunk_size := int(f.get_32())
-		var chunk_start := int(f.get_position())
-		match chunk_id:
-			"fmt ":
-				audio_format = f.get_16()
-				out.channels = f.get_16()
-				out.sample_rate = int(f.get_32())
-				f.get_32()  # byte rate
-				f.get_16()  # block align
-				bits = f.get_16()
-				if audio_format == 0xFFFE and chunk_size >= 40:
-					f.get_16()  # cbSize
-					f.get_16()  # valid bits per sample
-					f.get_32()  # channel mask
-					audio_format = f.get_16()  # first 2 bytes of the sub-format GUID
-			"data":
-				data_offset = chunk_start
-				data_size = mini(chunk_size, size - chunk_start)
-		# Chunks are word-aligned; guard against a bogus size stalling the loop.
-		var next := chunk_start + maxi(chunk_size, 0)
-		next += next & 1
-		f.seek(next)
-
-	if data_offset < 0 or data_size <= 0:
-		out.error = "no data chunk"
-		return out
-	if out.channels <= 0 or out.sample_rate <= 0 or bits <= 0:
-		out.error = "no usable fmt chunk"
-		return out
-	if audio_format != 1 and audio_format != 3:
-		out.error = "unsupported WAV codec (format=%d; only PCM and IEEE float)" % audio_format
-		return out
-
-	var frame_bytes := (bits / 8) * out.channels
-	if frame_bytes <= 0:
-		out.error = "bad frame size"
-		return out
-	out.frames = data_size / frame_bytes
-	if out.frames <= 0:
-		out.error = "empty data chunk"
-		return out
-
-	f.seek(data_offset)
-	var raw := f.get_buffer(out.frames * frame_bytes)
-	f.close()
-
-	var total := out.frames * out.channels
-	out.pcm.resize(total)
-	match [audio_format, bits]:
-		[1, 8]:
-			for i in total:
-				out.pcm[i] = (float(raw.decode_u8(i)) - 128.0) / 128.0
-		[1, 16]:
-			for i in total:
-				out.pcm[i] = float(raw.decode_s16(i * 2)) / 32768.0
-		[1, 24]:
-			for i in total:
-				var o := i * 3
-				var v := raw.decode_u8(o) | (raw.decode_u8(o + 1) << 8) | (raw.decode_u8(o + 2) << 16)
-				if v >= 0x800000:
-					v -= 0x1000000
-				out.pcm[i] = float(v) / 8388608.0
-		[1, 32]:
-			for i in total:
-				out.pcm[i] = float(raw.decode_s32(i * 4)) / 2147483648.0
-		[3, 32]:
-			for i in total:
-				out.pcm[i] = raw.decode_float(i * 4)
-		[3, 64]:
-			for i in total:
-				out.pcm[i] = float(raw.decode_double(i * 8))
-		_:
-			out.error = "unsupported sample width (format=%d, %d-bit)" % [audio_format, bits]
-			return out
-
-	out.ok = true
-	return out
-
-
-## Rebuild a looping AudioStreamWAV from the very PCM we detected on, so
-## playback and detection are guaranteed to be the same audio.
-func _build_stream(wav: WavPCM) -> AudioStreamWAV:
-	if not wav.ok:
-		return null
-	var out_channels := wav.channels if wav.channels <= 2 else 1
-	var buf := PackedByteArray()
-	buf.resize(wav.frames * out_channels * 2)
-	if out_channels == wav.channels:
-		for i in wav.pcm.size():
-			buf.encode_s16(i * 2, int(clampf(wav.pcm[i], -1.0, 1.0) * 32767.0))
-	else:
-		for frame in wav.frames:
-			var v := 0.0
-			for c in wav.channels:
-				v += wav.pcm[frame * wav.channels + c]
-			buf.encode_s16(frame * 2, int(clampf(v / float(wav.channels), -1.0, 1.0) * 32767.0))
-
-	var stream := AudioStreamWAV.new()
-	stream.format = AudioStreamWAV.FORMAT_16_BITS
-	stream.mix_rate = wav.sample_rate
-	stream.stereo = out_channels == 2
-	stream.data = buf
-	stream.loop_mode = AudioStreamWAV.LOOP_FORWARD
-	stream.loop_begin = 0
-	stream.loop_end = wav.frames
-	return stream
-
 
 # ────────────────────────────────────────────────────────────── playback ─────
 
@@ -686,7 +638,8 @@ func _is_downbeat(t: float) -> bool:
 func _is_auto_mode() -> bool:
 	if DisplayServer.get_name() == "headless":
 		return true
-	return OS.get_cmdline_user_args().has("--auto")
+	var args := OS.get_cmdline_user_args()
+	return args.has("--auto") or args.has("--export-chart")
 
 
 ## --autoplay: detect one loop, then actually play it and log every click's
@@ -726,6 +679,7 @@ func _run_auto() -> void:
 
 	# DetectPCM over every loop (cheap, no DB), then DetectMusic once to prove
 	# the registration route works too.
+	var export_charts := OS.get_cmdline_user_args().has("--export-chart")
 	var summary: Array[String] = []
 	var ok_count := 0
 	var runs := 0
@@ -734,8 +688,11 @@ func _run_auto() -> void:
 		_detect(path, API_PCM)
 		if not _beats.is_empty():
 			ok_count += 1
-		summary.append("  PCM   %-56s beats=%-4d bpm=%.2f (hint %.0f)" % [
-			path.get_file(), _beats.size(), _estimate_bpm(_beats), _bpm_from_filename(path)])
+		summary.append("  PCM   %-56s beats=%-3d -> %-3d notes  detected=%-7.2f grid=%.3f (%d bars)" % [
+			path.get_file(), _beats.size(), _steps.size(), BeatGrid.estimate_bpm(_beats),
+			_grid.get("bpm", 0.0), _grid.get("bars", 0)])
+		if export_charts and not _steps.is_empty():
+			print(_export_chart())
 		# Yield so PDJE's own logging flushes between runs.
 		await get_tree().process_frame
 
@@ -743,8 +700,9 @@ func _run_auto() -> void:
 	_detect(_loops[0], API_MUSIC)
 	if not _beats.is_empty():
 		ok_count += 1
-	summary.append("  MUSIC %-56s beats=%-4d bpm=%.2f (hint %.0f)" % [
-		_loops[0].get_file(), _beats.size(), _estimate_bpm(_beats), _bpm_from_filename(_loops[0])])
+	summary.append("  MUSIC %-56s beats=%-3d -> %-3d notes  detected=%-7.2f grid=%.3f (%d bars)" % [
+		_loops[0].get_file(), _beats.size(), _steps.size(), BeatGrid.estimate_bpm(_beats),
+		_grid.get("bpm", 0.0), _grid.get("bars", 0)])
 
 	print("\n########## BeatCheck auto run done (%d/%d runs returned beats) ##########" % [ok_count, runs])
 	for line in summary:
@@ -785,34 +743,6 @@ func _load_first_wav(dir_path: String) -> AudioStream:
 	if files.is_empty():
 		return null
 	return load(files[0]) as AudioStream
-
-
-## Sample-pack loops are named like "TSP_HLZ_174_drum_...". Pull the BPM out so
-## DetectMusic gets a sane hint and the estimate has something to compare with.
-func _bpm_from_filename(path: String) -> float:
-	var re := RegEx.new()
-	re.compile("(?:^|[_-])(\\d{2,3})(?:[_-])")
-	var m := re.search(path.get_file())
-	if m == null:
-		return 0.0
-	var bpm := float(m.get_string(1))
-	if bpm < 40.0 or bpm > 250.0:
-		return 0.0
-	return bpm
-
-
-func _estimate_bpm(beats: PackedFloat64Array) -> float:
-	if beats.size() < 2:
-		return 0.0
-	var diffs: Array[float] = []
-	for i in range(1, beats.size()):
-		diffs.append(float(beats[i] - beats[i - 1]))
-	diffs.sort()
-	var mid := diffs.size() / 2
-	var median := diffs[mid] if diffs.size() % 2 == 1 else (diffs[mid - 1] + diffs[mid]) * 0.5
-	if median <= 0.0:
-		return 0.0
-	return 60.0 / median
 
 
 func _format_times(times: PackedFloat64Array, count: int) -> String:

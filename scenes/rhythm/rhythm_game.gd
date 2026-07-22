@@ -5,8 +5,16 @@ extends Node2D
 ## judges key presses in GDScript, and pays out Beats to GameState. When you
 ## install Project-DJ-Godot, swap the timing + judgement here for PDJE's Core /
 ## Judge modules (see conductor.gd and addons/Project_DJ_Godot/INSTALL.md).
+##
+## The default chart is generated from a real loop: PDJE's Beat This detects the
+## beats, they get snapped to 16th notes on a bar-exact grid, and the loop plays
+## forever with the same pattern re-issued every lap. Regenerate it from
+## scenes/tools/beat_check.tscn ("Export chart"). Falls back to the hand-written
+## demo chart if the generated one is missing, so the scene never hard-depends
+## on the addon.
 
-const CHART_PATH := "res://data/charts/demo_chart.json"
+const CHART_PATH := "res://data/charts/TSP_ENEIV2_175_kit_throwback_drum_E.json"
+const FALLBACK_CHART_PATH := "res://data/charts/demo_chart.json"
 const LANE_COUNT := 4
 const LANE_WIDTH := 110.0
 const HIT_Y := 620.0
@@ -27,21 +35,35 @@ const BEATS_PERFECT := 10
 const BEATS_GREAT := 6
 const BEATS_GOOD := 3
 
-var _notes: Array = []               # [{time, lane, node, hit}]
-var _next_spawn := 0
+var _pattern: Array = []             # one lap of the chart: [{time, lane}]
+var _pending: Array = []             # upcoming notes, time-ordered
+var _active: Array = []              # spawned, not yet resolved
+var _laps_generated := 0
 var _playfield_x := 0.0
 var _finished := false
+
+var _looping := false
+var _loop_length := 0.0
+var _chart_title := ""
 
 var score := 0
 var combo := 0
 var max_combo := 0
 var beats_this_run := 0
+var notes_seen := 0
+var misses := 0
+
+## `-- --selftest [seconds]`: log the endless loop's bookkeeping and quit.
+## Observation only — it never presses anything.
+var _selftest_until := 0.0
+var _selftest_lap := -1
 
 var _hud: CanvasLayer
 var _score_label: Label
 var _combo_label: Label
 var _judge_label: Label
 var _beats_label: Label
+var _song_label: Label
 var _summary: Panel
 
 
@@ -49,36 +71,104 @@ func _ready() -> void:
 	_playfield_x = (1280.0 - LANE_COUNT * LANE_WIDTH) / 2.0
 	_build_playfield()
 	_build_hud()
-	_load_chart()
+	var stream := _load_chart()
+	_ensure_generated(APPROACH_TIME + 4.0)
 	Conductor.song_finished.connect(_on_song_finished)
-	# No audio file in the demo chart -> Conductor still runs a clock, so this
-	# is fully playable. Drop an AudioStream in to hear it.
-	Conductor.play_song(null, _chart_bpm)
+	# With no stream the Conductor still runs a clock, so the scene stays
+	# playable (silently) even if the audio file is unavailable.
+	Conductor.play_song(stream, _chart_bpm, _loop_length if _looping else 0.0)
+	_setup_selftest(stream)
 	set_process(true)
+
+
+func _setup_selftest(stream: AudioStream) -> void:
+	var args := OS.get_cmdline_user_args()
+	var idx := args.find("--selftest")
+	if idx < 0:
+		return
+	_selftest_until = float(args[idx + 1]) if idx + 1 < args.size() else 50.0
+	print("\n########## RhythmGame selftest (%.0f s) ##########" % _selftest_until)
+	print("chart=%s bpm=%.3f loop=%s loop_length=%.4f notes/lap=%d stream=%s" % [
+		_chart_title, _chart_bpm, _looping, _loop_length, _pattern.size(),
+		"none" if stream == null else "%s %.4f s" % [
+			stream.get_class(), stream.get_length()]])
 
 
 # --- Setup -------------------------------------------------------------------
 var _chart_bpm := 120.0
 
-func _load_chart() -> void:
-	var f := FileAccess.open(CHART_PATH, FileAccess.READ)
+## Reads the chart and returns the AudioStream to play with it (may be null).
+func _load_chart() -> AudioStream:
+	var path := CHART_PATH
+	if not FileAccess.file_exists(path):
+		push_warning("Chart %s not found — falling back to %s" % [path, FALLBACK_CHART_PATH])
+		path = FALLBACK_CHART_PATH
+	var f := FileAccess.open(path, FileAccess.READ)
 	if f == null:
-		push_error("Chart not found: %s" % CHART_PATH)
-		return
+		push_error("Chart not found: %s" % path)
+		return null
 	var data = JSON.parse_string(f.get_as_text())
 	f.close()
 	if typeof(data) != TYPE_DICTIONARY:
-		return
+		push_error("Chart is not a JSON object: %s" % path)
+		return null
+
 	_chart_bpm = float(data.get("bpm", 120))
-	var raw: Array = data.get("notes", [])
-	for n in raw:
-		_notes.append({
-			"time": float(n["time"]),
-			"lane": int(n["lane"]),
+	_chart_title = str(data.get("title", path.get_file().get_basename()))
+	_loop_length = float(data.get("loop_length", 0.0))
+	_looping = bool(data.get("loop", false)) and _loop_length > 0.0
+
+	for n in data.get("notes", []):
+		_pattern.append({"time": float(n["time"]), "lane": int(n["lane"]) % LANE_COUNT})
+	_pattern.sort_custom(func(a, b): return a["time"] < b["time"])
+
+	return _load_stream(data)
+
+
+## The loop is played from the imported (QOA) resource — but with the loop point
+## taken from the chart's frame count, which came from the original PCM. That
+## keeps the audio loop and the note grid on exactly the same period.
+func _load_stream(data: Dictionary) -> AudioStream:
+	var audio_path := str(data.get("audio", ""))
+	if audio_path.is_empty() or not ResourceLoader.exists(audio_path):
+		if not audio_path.is_empty():
+			push_warning("Chart audio missing: %s — playing silently." % audio_path)
+		return null
+	var src := load(audio_path)
+	if src is not AudioStreamWAV:
+		return src as AudioStream
+	var stream: AudioStreamWAV = (src as AudioStreamWAV).duplicate()
+	var loop_frames := int(data.get("loop_frames", 0))
+	if _looping and loop_frames > 0:
+		stream.loop_mode = AudioStreamWAV.LOOP_FORWARD
+		stream.loop_begin = 0
+		stream.loop_end = loop_frames
+	return stream
+
+
+## Endless play: hand out another lap of the pattern whenever the timeline runs
+## dry. Note times are absolute, so lap N is just the pattern + N * loop_length.
+func _ensure_generated(until: float) -> void:
+	if _pattern.is_empty():
+		return
+	if not _looping:
+		if _laps_generated == 0:
+			_append_lap(0)
+		return
+	while _laps_generated * _loop_length < until:
+		_append_lap(_laps_generated)
+
+
+func _append_lap(lap: int) -> void:
+	var offset := lap * _loop_length
+	for n in _pattern:
+		_pending.append({
+			"time": n["time"] + offset,
+			"lane": n["lane"],
 			"node": null,
 			"hit": false,
 		})
-	_notes.sort_custom(func(a, b): return a["time"] < b["time"])
+	_laps_generated = lap + 1
 
 
 func _build_playfield() -> void:
@@ -109,14 +199,15 @@ func _build_hud() -> void:
 	_score_label = _make_label(Vector2(30, 24), 28)
 	_combo_label = _make_label(Vector2(30, 64), 22)
 	_beats_label = _make_label(Vector2(30, 100), 20)
+	_song_label = _make_label(Vector2(30, 132), 16)
 	_judge_label = _make_label(Vector2(1280 / 2 - 80, 420), 40)
 	_judge_label.size = Vector2(160, 60)
 	_judge_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 
 	var back := Button.new()
-	back.text = "Menu (Esc)"
-	back.position = Vector2(1130, 24)
-	back.pressed.connect(_back_to_menu)
+	back.text = "Finish (Esc)"
+	back.position = Vector2(1110, 24)
+	back.pressed.connect(_end_run)
 	_hud.add_child(back)
 
 	_refresh_hud()
@@ -132,30 +223,74 @@ func _make_label(pos: Vector2, font_size: int) -> Label:
 
 # --- Main loop ---------------------------------------------------------------
 func _process(_delta: float) -> void:
+	if _finished:
+		return
 	var t: float = Conductor.song_position
 	var px_per_sec := (HIT_Y - SPAWN_Y) / APPROACH_TIME
 
+	_ensure_generated(t + APPROACH_TIME + 4.0)
+
 	# Spawn note visuals as they enter the approach window.
-	while _next_spawn < _notes.size() and _notes[_next_spawn]["time"] - t <= APPROACH_TIME:
-		_spawn_note(_next_spawn)
-		_next_spawn += 1
+	while not _pending.is_empty() and _pending[0]["time"] - t <= APPROACH_TIME:
+		var note = _pending.pop_front()
+		_spawn_note(note)
+		_active.append(note)
 
-	# Move active notes; auto-miss notes that fall past the window.
+	# Move active notes; auto-miss notes that fall past the window. Iterating
+	# backwards so resolved notes can be dropped in place — _active must stay
+	# bounded, the timeline never ends.
 	var window_good := WIN_GOOD + GameState.judge_window_bonus_ms / 1000.0
-	for note in _notes:
-		if note["hit"] or note["node"] == null:
-			continue
-		var y: float = HIT_Y - (float(note["time"]) - t) * px_per_sec
-		note["node"].position.y = y - NOTE_HEIGHT / 2.0
-		if t - note["time"] > window_good:
-			_register_miss(note)
+	for i in range(_active.size() - 1, -1, -1):
+		var note = _active[i]
+		if not note["hit"]:
+			note["node"].position.y = \
+				HIT_Y - (float(note["time"]) - t) * px_per_sec - NOTE_HEIGHT / 2.0
+			if t - note["time"] > window_good:
+				_register_miss(note)
+		if note["hit"]:
+			_active.remove_at(i)
 
-	if not _finished and _next_spawn >= _notes.size() and _all_resolved():
+	if not _looping and not _finished and _pending.is_empty() and _active.is_empty():
 		_end_run()
+	elif _looping:
+		_refresh_lap()
+
+	if _selftest_until > 0.0:
+		_tick_selftest(t)
 
 
-func _spawn_note(idx: int) -> void:
-	var note = _notes[idx]
+func _tick_selftest(t: float) -> void:
+	if Conductor.loops_completed != _selftest_lap:
+		_selftest_lap = Conductor.loops_completed
+		print("lap %-2d  t=%8.3f  expected=%8.3f  pending=%-4d active=%-3d seen=%-4d missed=%d" % [
+			_selftest_lap + 1, t, _selftest_lap * _loop_length,
+			_pending.size(), _active.size(), notes_seen, misses])
+	if t >= _selftest_until:
+		_finish_selftest("time limit")
+
+
+func _finish_selftest(reason: String) -> void:
+	if _selftest_until <= 0.0:
+		return
+	_selftest_until = 0.0
+	print("laps=%d  notes seen=%d (%d expected)  missed=%d  pending=%d  active=%d" % [
+		Conductor.loops_completed + 1, notes_seen,
+		_pattern.size() * (Conductor.loops_completed + 1), misses,
+		_pending.size(), _active.size()])
+	print("########## RhythmGame selftest done (%s) ##########" % reason)
+	# Tear down before quitting: queue_free() never runs if we quit mid-frame.
+	for note in _active:
+		if note["node"]:
+			note["node"].free()
+			note["node"] = null
+	_active.clear()
+	_pending.clear()
+	Conductor.stop()
+	get_tree().quit(0)
+
+
+func _spawn_note(note: Dictionary) -> void:
+	notes_seen += 1
 	var rect := ColorRect.new()
 	rect.color = LANE_COLORS[note["lane"]]
 	rect.size = Vector2(LANE_WIDTH - 16, NOTE_HEIGHT)
@@ -167,7 +302,13 @@ func _spawn_note(idx: int) -> void:
 # --- Input & judgement -------------------------------------------------------
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("ui_cancel"):
-		_back_to_menu()
+		# The loop never ends on its own, so Esc banks the run; Esc again leaves.
+		if _finished:
+			_back_to_menu()
+		else:
+			_end_run()
+		return
+	if _finished:
 		return
 	for lane in range(LANE_COUNT):
 		if event.is_action_pressed("lane_%d" % lane):
@@ -179,8 +320,8 @@ func _judge_lane(lane: int) -> void:
 	var bonus := GameState.judge_window_bonus_ms / 1000.0
 	var best = null
 	var best_dt := 1000.0
-	for note in _notes:
-		if note["hit"] or note["lane"] != lane or note["node"] == null:
+	for note in _active:
+		if note["hit"] or note["lane"] != lane:
 			continue
 		var dt: float = abs(note["time"] - t)
 		if dt < best_dt:
@@ -221,6 +362,7 @@ func _register_miss(note) -> void:
 		note["node"].queue_free()
 		note["node"] = null
 	combo = 0
+	misses += 1
 	_flash_judge("MISS", Color("#ff5964"))
 	_refresh_hud()
 
@@ -234,13 +376,15 @@ func _refresh_hud() -> void:
 	_score_label.text = "Score: %d" % score
 	_combo_label.text = "Combo: %d" % combo
 	_beats_label.text = "Beats +%d  (total %d)" % [beats_this_run, GameState.beats]
+	_refresh_lap()
 
 
-func _all_resolved() -> bool:
-	for note in _notes:
-		if not note["hit"]:
-			return false
-	return true
+func _refresh_lap() -> void:
+	if not _looping:
+		_song_label.text = "%s  —  %.0f BPM" % [_chart_title, _chart_bpm]
+		return
+	_song_label.text = "%s  —  %.2f BPM  /  loop %d  (%d notes per lap, endless — Esc to finish)" % [
+		_chart_title, _chart_bpm, Conductor.loops_completed + 1, _pattern.size()]
 
 
 # --- End of run --------------------------------------------------------------
@@ -249,9 +393,18 @@ func _on_song_finished() -> void:
 
 
 func _end_run() -> void:
+	if _finished:
+		return
 	_finished = true
+	Conductor.stop()
+	for note in _active:
+		if note["node"]:
+			note["node"].queue_free()
+	_active.clear()
+	_pending.clear()
 	GameState.save_game()
 	_show_summary()
+	_finish_selftest("chart ended")
 
 
 func _show_summary() -> void:
@@ -267,12 +420,13 @@ func _show_summary() -> void:
 	_summary.add_child(vb)
 
 	var title := Label.new()
-	title.text = "Song Complete!"
+	title.text = "Run Complete!" if _looping else "Song Complete!"
 	title.add_theme_font_size_override("font_size", 32)
 	vb.add_child(title)
 
 	var stats := Label.new()
-	stats.text = "Score: %d\nMax Combo: %d\nBeats earned: %d" % [score, max_combo, beats_this_run]
+	stats.text = "Score: %d\nMax Combo: %d\nBeats earned: %d\nNotes: %d  (missed %d)\nLoops played: %d" % [
+		score, max_combo, beats_this_run, notes_seen, misses, Conductor.loops_completed + 1]
 	stats.add_theme_font_size_override("font_size", 20)
 	vb.add_child(stats)
 
