@@ -28,37 +28,41 @@ const COMPOSER := "rhythmincremental"
 ## the two collide and LoadMusic() answers -2 for the loser.
 const TITLE_PREFIX := "ri_"
 const FULL_MANUAL_RENDER_FALLBACK := 2
+
+## Frame buffer handed to InitPlayer(). The shipped config_and_play.gd example
+## passes 48 and the judge docs pass 480; neither says what it costs. Measured
+## with two layers playing and one being time-stretched, it sets how far the
+## engine runs ahead of the speakers: 48 -> ~0.10 s, 480 -> ~0.14 s,
+## 2048 -> ~0.22 s. 48 frames is 1 ms of work per callback, which is tight
+## enough to underrun and click under load, so this trades 40 ms of latency for
+## headroom. Sync does not depend on it — CueMusic takes hold of the output
+## immediately, so position() is measured from the cue, not from the buffer.
+const PLAYER_FRAME_BUFFER := 480
 const FRAME_RATE := 48000.0     # GetConsumedFrames() is documented as /48000
 
-## GetConsumedFrames() counts frames the engine has *generated*, which is a
-## fixed prebuffer ahead of what has reached the speakers. Measured in
-## scenes/tools/pdje_audio_check.tscn: the counter sits exactly 5328 frames
-## (0.111 s) above wall-clock, constant across 23 s and across runs. That is
-## 23% of a beat at 125 BPM, so uncorrected it makes every note read as landing
-## before its kick.
+## GetConsumedFrames() sits a fixed prebuffer above wall-clock — measured at
+## 5328 frames (0.111 s) in scenes/tools/pdje_audio_check.tscn, constant across
+## runs. It is NOT subtracted anywhere, and that is deliberate: CueMusic takes
+## hold of the output immediately, so the song's first sample is heard at the
+## moment of the latch cue, which makes elapsed-time-since-latch already equal
+## to position-in-the-song. Subtracting the prebuffer on top pushed the loop
+## cue a prebuffer late and opened a gap at the first seam.
 ##
-## Not auto-measured: the counter does not advance linearly between Activate()
-## and the first frame, because registration and ChangeBpm() block. It is a
-## property of the frame buffer size handed to InitPlayer(), so it only needs
-## revisiting if that changes. Tune by ear if notes feel early (raise) or late
-## (lower).
+## Kept as documentation of the engine's buffer depth.
 const ENGINE_PREBUFFER_FRAMES := 5328.0
 
 ## MusPanel does NOT loop: a music plays once and then stays silent. So we have
 ## to rewind each layer ourselves at the loop point.
 const MANUAL_LOOP := true
 
-## How long after the *audible* loop point to issue the rewind, in frames.
+## Trim on the loop rewind, in frames. Raise it if the next lap arrives early,
+## lower it (negative is fine) if a gap opens at the seam. 48 frames = 1 ms.
 ##
-## CueMusic does not queue behind the engine's prebuffer — it takes hold of what
-## is coming out of the speakers. Timing it against the raw counter therefore
-## fires a whole prebuffer early and chops ENGINE_PREBUFFER_FRAMES (0.111 s,
-## 23% of a beat at 125 BPM) off the end of every lap, which is heard as the
-## next loop stumbling in ahead of the beat. So the cue is timed against the
-## latency-compensated position instead, and this is the remaining trim.
-##
-## Raise it if the loop still arrives early, lower it (negative is fine) if a
-## gap opens up at the seam. 48 frames = 1 ms.
+## Note that seams 2..N are self-correcting whatever this is set to — each cue
+## defines both the end of one lap and the start of the next, so a constant
+## offset cancels. Only the *first* seam is pinned independently, by the latch,
+## so a gap or overlap that appears there and nowhere else means the clock's
+## zero point disagrees with the cue, not that this value is wrong.
 const CUE_TRIM_FRAMES := 0.0
 
 var ready_to_play: bool = false
@@ -114,7 +118,7 @@ func start(layers: Dictionary, song_bpm: float, loop_length: float) -> bool:
 	var mode := ClassDB.class_get_integer_constant("PDJE_Wrapper", "FULL_MANUAL_RENDER")
 	if mode == 0:
 		mode = FULL_MANUAL_RENDER_FALLBACK
-	if not _engine.InitPlayer(mode, "void", 48):
+	if not _engine.InitPlayer(mode, "void", PLAYER_FRAME_BUFFER):
 		_note("InitPlayer failed")
 		return false
 	_player = _engine.GetPlayer()
@@ -180,17 +184,15 @@ func active_layers() -> PackedStringArray:
 	return out
 
 
-## Seconds of *audible* song, i.e. already latency-compensated. Monotonic — it
-## keeps rising across laps, so it drops straight into Conductor.song_position.
+## Seconds into the song. Monotonic — it keeps rising across laps, so it drops
+## straight into Conductor.song_position.
 ##
-## Two corrections are folded in here:
-##
-##   - The zero point is latched on the first call rather than at the end of
-##     start(), with every layer rewound at that same instant. Registering and
-##     loading takes a variable ~0.9 s, and measuring before the first frame
-##     leaves the chart that far behind the audio.
-##   - ENGINE_PREBUFFER_FRAMES is subtracted, so what comes back is where the
-##     song is in the speakers rather than in the engine's buffer.
+## The zero point is latched on the first call rather than at the end of
+## start(), with every layer rewound and unmuted at that same instant.
+## Registering and loading takes a variable ~0.9 s, and measuring before the
+## first frame leaves the chart that far behind the audio. Because the cue takes
+## hold of the output there and then, elapsed time from the latch IS position in
+## the song; see ENGINE_PREBUFFER_FRAMES for why nothing is subtracted.
 func position() -> float:
 	if _player == null:
 		return 0.0
@@ -205,14 +207,6 @@ func position() -> float:
 			var on := bool(_wanted.get(name, false))
 			_panel.SetMusic(_titles[name], on)
 			_on[name] = on
-	return _raw_position() - ENGINE_PREBUFFER_FRAMES / FRAME_RATE
-
-
-## Where the engine's generator is, as opposed to where the speakers are.
-## Loop cues are timed against this; note timing is not.
-func _raw_position() -> float:
-	if _player == null or not _clock_latched:
-		return 0.0
 	return (_consumed_frames() - _frames_at_start) / FRAME_RATE
 
 
@@ -228,7 +222,7 @@ func _raw_position() -> float:
 func pump(delta: float) -> void:
 	if not MANUAL_LOOP or _panel == null or _loop_length <= 0.0 or not _clock_latched:
 		return
-	var now := position()          # audible position — see CUE_TRIM_FRAMES
+	var now := position()
 	var next_lap := _laps_cued + 1
 	var boundary := next_lap * _loop_length + CUE_TRIM_FRAMES / FRAME_RATE
 	if now + delta * 0.5 < boundary:
@@ -237,8 +231,8 @@ func pump(delta: float) -> void:
 	for name in _titles.keys():
 		_panel.CueMusic(_titles[name], "0")
 	if _log_cues:
-		print("[song] lap %d cued at audible %.4f s (target %.4f, %+.1f ms; raw %.4f)" % [
-			next_lap, now, boundary, (now - boundary) * 1000.0, _raw_position()])
+		print("[song] lap %d cued at %.4f s (target %.4f, %+.1f ms)" % [
+			next_lap, now, boundary, (now - boundary) * 1000.0])
 
 
 func stop() -> void:

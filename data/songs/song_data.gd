@@ -19,7 +19,13 @@ const TITLE := "Four On The Floor"
 ## The base layer is generated: a kick one-shot placed on every beat. The baked
 ## loop is written to user:// so PDJE can register it like any other music file.
 const KICK_PATH := "res://audio/sfx/SSTN_DrumOneshots_Kick3.wav"
-const PULSE_CACHE := "user://cache/audio/kick_pulse_%dbpm_%dbars.wav"
+## Peak the baked pulse is normalised to. Deliberately not near full scale:
+## PDJE mixes this with the other layers, and a loop that already peaks at 0.97
+## leaves nothing for them to sum into.
+const PULSE_PEAK := 0.7
+## Bumped whenever the bake changes, so a stale cache is not reused.
+const PULSE_BAKE_VERSION := 2
+const PULSE_CACHE := "user://cache/audio/kick_pulse_%dbpm_%dbars_v%d.wav"
 
 ## Skill-gated overlays. `source_bpm` is the tempo the file was authored at;
 ## anything other than BPM gets ChangeBpm()'d on the way in.
@@ -86,7 +92,7 @@ static func chart() -> Array:
 ## sample is unreadable. Cached on disk — the content only depends on the
 ## sample, the tempo and the bar count.
 static func kick_pulse_path() -> String:
-	var out := PULSE_CACHE % [int(BPM), BARS]
+	var out := PULSE_CACHE % [int(BPM), BARS, PULSE_BAKE_VERSION]
 	if FileAccess.file_exists(out):
 		return out
 	var kick := WavPCM.parse(KICK_PATH)
@@ -98,7 +104,7 @@ static func kick_pulse_path() -> String:
 	var pulse := AudioBake.silence(beat_frames * beats_per_loop(), maxi(kick.channels, 2), sr)
 	for b in beats_per_loop():
 		AudioBake.overlay(pulse, kick, b * beat_frames)
-	AudioBake.limit(pulse)
+	AudioBake.limit(pulse, PULSE_PEAK)
 	if not pulse.save_wav16(out):
 		return ""
 	return out

@@ -82,8 +82,15 @@ func _run() -> void:
 	var mode := ClassDB.class_get_integer_constant("PDJE_Wrapper", "FULL_MANUAL_RENDER")
 	if mode == 0:
 		mode = FULL_MANUAL_RENDER_FALLBACK
-	_say("InitPlayer(FULL_MANUAL_RENDER=%d, \"void\", 48) -> %s" % [
-		mode, _engine.InitPlayer(mode, "void", 48)])
+	# `-- --buffer N`: the shipped examples pass 48 here and the judge docs pass
+	# 480, with no explanation of the units. Sweep it to find out what it costs.
+	var buffer := 48
+	var args := OS.get_cmdline_user_args()
+	var bi := args.find("--buffer")
+	if bi >= 0 and bi + 1 < args.size():
+		buffer = int(args[bi + 1])
+	_say("InitPlayer(FULL_MANUAL_RENDER=%d, \"void\", %d) -> %s" % [
+		mode, buffer, _engine.InitPlayer(mode, "void", buffer)])
 	_player = _engine.GetPlayer()
 	if _player == null:
 		_say("[color=#ff6b6b]GetPlayer() returned null — manual render path unavailable.[/color]")
@@ -105,14 +112,16 @@ func _run() -> void:
 	_say("loaded list (after) = %s" % str(_panel.GetLoadedMusicList()))
 
 	# The timed script below drives the actual questions.
-	# How long does PDJE think our loops actually are? The loop point stumbles,
-	# which means the cue at 15.36 s is landing before the content really ends.
-	# Beat This decodes through PDJE's own decoder, so the spacing it reports is
-	# a direct read on the playback rate PDJE is using.
-	_probe_length(SongData.kick_pulse_path(), SongData.BPM)
-	_probe_length(BASS_LOOP, BASS_BPM)
-
-	_steps = [{"at": 0.2, "what": "done", "do": func(): _finish(0)}]
+	# Play both layers so the buffer is under a realistic load (two musics, one
+	# of them being time-stretched), and watch how far the counter runs ahead of
+	# wall-clock — that gap is the engine's buffer depth.
+	_panel.SetMusic(kick_title, true)
+	_panel.ChangeBpm(bass_title, TARGET_BPM, BASS_BPM)
+	_panel.SetMusic(bass_title, true)
+	_t0 = Time.get_ticks_msec() / 1000.0
+	_steps = [{"at": 12.0, "what": "done", "do": func(): _finish(0)}]
+	set_process(true)
+	return
 	_t0 = Time.get_ticks_msec() / 1000.0
 	_say("\n--- timeline (watch whether consumed frames advance) ---")
 	set_process(true)
