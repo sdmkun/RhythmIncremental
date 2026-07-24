@@ -13,6 +13,7 @@ const NODE_LAYOUT := {
 	&"idle_1": {"pos": Vector2(-200, 0), "root": false},
 	&"window_1": {"pos": Vector2(200, 0), "root": false},
 	&"multiplier_2": {"pos": Vector2(0, 180), "root": false},
+	&"layer_bass": {"pos": Vector2(-420, -180), "root": false},
 }
 
 var _beats_label: Label
@@ -54,6 +55,13 @@ func _ready() -> void:
 	_message_timer.timeout.connect(func(): _message_label.visible = false)
 	add_child(_message_timer)
 
+	var hint := Label.new()
+	hint.text = "Left click: buy    Right click: refund one level (debug)"
+	hint.add_theme_font_size_override("font_size", 15)
+	hint.add_theme_color_override("font_color", Color("#8a83a8"))
+	hint.position = Vector2(400, 80)
+	add_child(hint)
+
 	var back := Button.new()
 	back.text = "◀ Back to Menu"
 	back.position = Vector2(1130, 24)
@@ -70,6 +78,7 @@ func _ready() -> void:
 
 	GameState.beats_changed.connect(func(_t): _refresh_all())
 	GameState.upgrade_purchased.connect(func(_id): _refresh_all())
+	GameState.upgrade_refunded.connect(func(_id): _refresh_all())
 	_refresh_all()
 
 
@@ -139,6 +148,10 @@ func _on_yg_node_created(node: YggdrasilNodeButton) -> void:
 	var id: StringName = _id_to_skill[node.id]
 	_yg_nodes[id] = node
 
+	# Yggdrasil's button only consumes left clicks (its _gui_input ignores every
+	# other button), so right-click is free for us to take over here.
+	node.gui_input.connect(_on_node_gui_input.bind(node))
+
 	var lbl := Label.new()
 	lbl.set_anchors_preset(Control.PRESET_FULL_RECT)
 	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -168,6 +181,33 @@ func _on_node_pressed(node: YggdrasilNodeButton) -> void:
 		_show_message("Not enough Beats.")
 		return
 	_tree_view.allocation_service._allocate_node(node)
+
+
+func _on_node_gui_input(event: InputEvent, node: YggdrasilNodeButton) -> void:
+	if not (event is InputEventMouseButton):
+		return
+	var mb := event as InputEventMouseButton
+	if mb.button_index != MOUSE_BUTTON_RIGHT or not mb.pressed:
+		return
+	get_viewport().set_input_as_handled()
+	_refund_node(node)
+
+
+## Debug refund: give a level back and mirror it in Yggdrasil's visuals.
+func _refund_node(node: YggdrasilNodeButton) -> void:
+	var id: StringName = _id_to_skill[node.id]
+	if GameState.get_upgrade_level(id) <= 0:
+		return
+	var blockers := SkillData.dependents_owned(id, GameState.upgrade_levels)
+	if GameState.get_upgrade_level(id) == 1 and not blockers.is_empty():
+		var names: Array[String] = []
+		for b in blockers:
+			names.append(String(SkillData.get_def(b)["name"]))
+		_show_message("Required by: %s" % ", ".join(names))
+		return
+	if not GameState.refund_upgrade(id):
+		return
+	_tree_view.allocation_service._deallocate_node(node)
 
 
 func _show_message(text: String) -> void:

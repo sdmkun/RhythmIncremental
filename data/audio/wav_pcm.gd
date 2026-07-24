@@ -127,6 +127,38 @@ static func parse(path: String) -> WavPCM:
 	return out
 
 
+## Write this buffer back out as a 16-bit PCM .wav that `parse()` can reload.
+## Used to cache expensive bakes under user:// — see data/songs/song_data.gd.
+func save_wav16(path: String) -> bool:
+	if not ok:
+		return false
+	DirAccess.make_dir_recursive_absolute(path.get_base_dir())
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	if f == null:
+		push_warning("WavPCM: cannot write %s (%s)" % [path, error_string(FileAccess.get_open_error())])
+		return false
+	var data_bytes := frames * channels * 2
+	f.store_buffer("RIFF".to_ascii_buffer())
+	f.store_32(36 + data_bytes)
+	f.store_buffer("WAVEfmt ".to_ascii_buffer())
+	f.store_32(16)                          # fmt chunk size
+	f.store_16(1)                           # PCM
+	f.store_16(channels)
+	f.store_32(sample_rate)
+	f.store_32(sample_rate * channels * 2)  # byte rate
+	f.store_16(channels * 2)                # block align
+	f.store_16(16)                          # bits per sample
+	f.store_buffer("data".to_ascii_buffer())
+	f.store_32(data_bytes)
+	var buf := PackedByteArray()
+	buf.resize(data_bytes)
+	for i in mini(pcm.size(), frames * channels):
+		buf.encode_s16(i * 2, int(clampf(pcm[i], -1.0, 1.0) * 32767.0))
+	f.store_buffer(buf)
+	f.close()
+	return true
+
+
 ## Rebuild a looping AudioStreamWAV from this exact PCM, so what gets analysed
 ## and what gets played are guaranteed to be the same audio.
 func to_stream(looping: bool = true) -> AudioStreamWAV:

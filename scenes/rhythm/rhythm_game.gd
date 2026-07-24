@@ -71,7 +71,7 @@ func _ready() -> void:
 	_playfield_x = (1280.0 - LANE_COUNT * LANE_WIDTH) / 2.0
 	_build_playfield()
 	_build_hud()
-	var stream := _load_chart()
+	var stream := _load_song()
 	_ensure_generated(APPROACH_TIME + 4.0)
 	Conductor.song_finished.connect(_on_song_finished)
 	# With no stream the Conductor still runs a clock, so the scene stays
@@ -88,16 +88,39 @@ func _setup_selftest(stream: AudioStream) -> void:
 		return
 	_selftest_until = float(args[idx + 1]) if idx + 1 < args.size() else 50.0
 	print("\n########## RhythmGame selftest (%.0f s) ##########" % _selftest_until)
-	print("chart=%s bpm=%.3f loop=%s loop_length=%.4f notes/lap=%d stream=%s" % [
+	print("chart=%s bpm=%.3f loop=%s loop_length=%.4f notes/lap=%d layers=[%s] stream=%s" % [
 		_chart_title, _chart_bpm, _looping, _loop_length, _pattern.size(),
+		", ".join(_layers),
 		"none" if stream == null else "%s %.4f s" % [
 			stream.get_class(), stream.get_length()]])
 
 
 # --- Setup -------------------------------------------------------------------
 var _chart_bpm := 120.0
+var _layers: PackedStringArray = PackedStringArray()
 
-## Reads the chart and returns the AudioStream to play with it (may be null).
+
+## Assemble the song from SongData (kick pulse + whatever layers the player's
+## skills have switched on). Falls back to the JSON chart pipeline if the source
+## audio is unavailable, so the scene is never dead.
+func _load_song() -> AudioStream:
+	var song := SongData.build(GameState.upgrade_levels)
+	for line in song["log"]:
+		print("[song] %s" % line)
+	if not song["ok"]:
+		push_warning("SongData could not build (see log) — falling back to the JSON chart.")
+		return _load_chart()
+
+	_chart_bpm = float(song["bpm"])
+	_chart_title = String(song["title"])
+	_loop_length = float(song["loop_length"])
+	_looping = _loop_length > 0.0
+	_layers = song["layers"]
+	_pattern = song["notes"]
+	return song["stream"]
+
+
+## Reads a generated chart JSON and returns the AudioStream to play with it.
 func _load_chart() -> AudioStream:
 	var path := CHART_PATH
 	if not FileAccess.file_exists(path):
@@ -383,8 +406,9 @@ func _refresh_lap() -> void:
 	if not _looping:
 		_song_label.text = "%s  —  %.0f BPM" % [_chart_title, _chart_bpm]
 		return
-	_song_label.text = "%s  —  %.2f BPM  /  loop %d  (%d notes per lap, endless — Esc to finish)" % [
-		_chart_title, _chart_bpm, Conductor.loops_completed + 1, _pattern.size()]
+	var layers := "kick" if _layers.is_empty() else "kick + " + ", ".join(_layers)
+	_song_label.text = "%s  —  %.2f BPM  /  loop %d  /  layers: %s  (endless — Esc to finish)" % [
+		_chart_title, _chart_bpm, Conductor.loops_completed + 1, layers]
 
 
 # --- End of run --------------------------------------------------------------

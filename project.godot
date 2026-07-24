@@ -16,10 +16,6 @@ run/main_scene="res://scenes/main_menu/main_menu.tscn"
 config/features=PackedStringArray("4.7", "GL Compatibility")
 config/icon="res://icon.svg"
 
-[editor_plugins]
-
-enabled=PackedStringArray("res://addons/yggdrasil/plugin.cfg")
-
 [autoload]
 
 GameState="*res://autoload/game_state.gd"
@@ -33,6 +29,10 @@ window/size/viewport_width=1280
 window/size/viewport_height=720
 window/stretch/mode="canvas_items"
 window/stretch/aspect="expand"
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/yggdrasil/plugin.cfg")
 
 [input]
 

@@ -9,9 +9,12 @@ class_name SkillData
 ## through GameState.buy_upgrade() below.
 
 # effect:
-#   "score_mult" -> +per_level to Beats multiplier per note hit
-#   "idle"       -> +per_level passive Beats/sec (the incremental engine)
-#   "window"     -> +per_level ms added to every hit window (easier timing)
+#   "score_mult"  -> +per_level to Beats multiplier per note hit
+#   "idle"        -> +per_level passive Beats/sec (the incremental engine)
+#   "window"      -> +per_level ms added to every hit window (easier timing)
+#   "audio_layer" -> switches on the SongData layer named by "layer" (pillar 1:
+#                    the song itself grows as you spend Beats). No numeric
+#                    effect, so it is skipped by GameState._recompute_multipliers.
 const DEFS := {
 	&"multiplier_1": {
 		"name": "Groove Amp I",
@@ -41,6 +44,13 @@ const DEFS := {
 		"base_cost": 600, "cost_growth": 2.0,
 		"requires": [&"idle_1", &"window_1"],
 	},
+	&"layer_bass": {
+		"name": "Slap Bass",
+		"desc": "Layers a funky slap bass under the kick.",
+		"effect": "audio_layer", "layer": &"bass", "per_level": 0.0, "max_level": 1,
+		"base_cost": 200, "cost_growth": 1.0,
+		"requires": [&"multiplier_1"],
+	},
 }
 
 
@@ -68,3 +78,15 @@ static func is_unlocked(id: StringName, levels: Dictionary) -> bool:
 		if int(levels.get(req, 0)) <= 0:
 			return false
 	return true
+
+
+## Owned skills that would be orphaned if `id` dropped to level 0.
+## Used to stop a debug refund from stranding its own dependants.
+static func dependents_owned(id: StringName, levels: Dictionary) -> Array[StringName]:
+	var out: Array[StringName] = []
+	for other in DEFS.keys():
+		if other == id or int(levels.get(other, 0)) <= 0:
+			continue
+		if DEFS[other]["requires"].has(id):
+			out.append(other)
+	return out

@@ -7,6 +7,7 @@ extends Node
 
 signal beats_changed(total: int)
 signal upgrade_purchased(id: StringName)
+signal upgrade_refunded(id: StringName)
 
 const SAVE_PATH := "user://save.json"
 
@@ -77,6 +78,41 @@ func buy_upgrade(id: StringName) -> bool:
 	upgrade_purchased.emit(id)
 	save_game()
 	return true
+
+
+## Give one level back and return what it cost. Debug affordance (right-click in
+## the skill tree), not a designed respec — it refunds the full price.
+## Refuses to drop a skill to 0 while an owned skill still requires it.
+func refund_upgrade(id: StringName) -> bool:
+	var level := get_upgrade_level(id)
+	if level <= 0:
+		return false
+	if level == 1 and not SkillData.dependents_owned(id, upgrade_levels).is_empty():
+		return false
+	var refund := SkillData.cost_for_level(id, level - 1)
+	if level > 1:
+		upgrade_levels[id] = level - 1
+	else:
+		upgrade_levels.erase(id)
+	beats += refund
+	lifetime_beats = maxi(lifetime_beats - refund, 0)
+	_recompute_multipliers()
+	beats_changed.emit(beats)
+	upgrade_refunded.emit(id)
+	save_game()
+	return true
+
+
+## Layer names (SongData.LAYERS keys) switched on by the skills owned right now.
+func active_audio_layers() -> Array[StringName]:
+	var out: Array[StringName] = []
+	for id in upgrade_levels.keys():
+		var def := SkillData.get_def(id)
+		if def.is_empty() or int(upgrade_levels[id]) <= 0:
+			continue
+		if String(def["effect"]) == "audio_layer":
+			out.append(def["layer"])
+	return out
 
 
 func _recompute_multipliers() -> void:
