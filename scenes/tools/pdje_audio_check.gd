@@ -105,30 +105,55 @@ func _run() -> void:
 	_say("loaded list (after) = %s" % str(_panel.GetLoadedMusicList()))
 
 	# The timed script below drives the actual questions.
-	# ChangeBpm returns false when called right after LoadMusic but true when
-	# called seconds later, so something has to settle first. Bisect what:
-	# is it "the music must be ON", or simply elapsed time?
-	_say("ChangeBpm straight after LoadMusic (music still OFF) -> %s"
-		% _panel.ChangeBpm(bass_title, TARGET_BPM, BASS_BPM))
-	_panel.SetMusic(bass_title, true)
-	_say("ChangeBpm same frame as SetMusic(on) -> %s"
-		% _panel.ChangeBpm(bass_title, TARGET_BPM, BASS_BPM))
-	await get_tree().process_frame
-	_say("ChangeBpm one frame later -> %s"
-		% _panel.ChangeBpm(bass_title, TARGET_BPM, BASS_BPM))
+	# How long does PDJE think our loops actually are? The loop point stumbles,
+	# which means the cue at 15.36 s is landing before the content really ends.
+	# Beat This decodes through PDJE's own decoder, so the spacing it reports is
+	# a direct read on the playback rate PDJE is using.
+	_probe_length(SongData.kick_pulse_path(), SongData.BPM)
+	_probe_length(BASS_LOOP, BASS_BPM)
 
-	_steps = [
-		{"at": 0.5, "what": "ChangeBpm @0.5s", "do": func(): _say("  -> %s" % _panel.ChangeBpm(bass_title, TARGET_BPM, BASS_BPM))},
-		{"at": 1.0, "what": "ChangeBpm @1.0s", "do": func(): _say("  -> %s" % _panel.ChangeBpm(bass_title, TARGET_BPM, BASS_BPM))},
-		{"at": 2.0, "what": "ChangeBpm @2.0s", "do": func(): _say("  -> %s" % _panel.ChangeBpm(bass_title, TARGET_BPM, BASS_BPM))},
-		{"at": 4.0, "what": "ChangeBpm @4.0s", "do": func(): _say("  -> %s" % _panel.ChangeBpm(bass_title, TARGET_BPM, BASS_BPM))},
-		{"at": 6.0, "what": "ChangeBpm @6.0s", "do": func(): _say("  -> %s" % _panel.ChangeBpm(bass_title, TARGET_BPM, BASS_BPM))},
-		{"at": 8.0, "what": "kick ON too (two layers)", "do": func(): _say("  SetMusic(kick,true) -> %s" % _panel.SetMusic(kick_title, true))},
-		{"at": 10.0, "what": "done", "do": func(): _finish(0)},
-	]
+	_steps = [{"at": 0.2, "what": "done", "do": func(): _finish(0)}]
 	_t0 = Time.get_ticks_msec() / 1000.0
 	_say("\n--- timeline (watch whether consumed frames advance) ---")
 	set_process(true)
+
+
+## Compare the file as WE read it against the beats PDJE's decoder produces.
+## If PDJE is playing at the wrong rate, the beat spacing it reports will be
+## off by exactly that ratio, and the true loop length with it.
+func _probe_length(path: String, bpm: float) -> void:
+	if path.is_empty():
+		return
+	_say("\n--- %s ---" % path.get_file())
+	var wav := WavPCM.parse(path)
+	if wav.ok:
+		_say("  file: %d Hz, %d ch, %d frames = %.4f s" % [
+			wav.sample_rate, wav.channels, wav.frames, wav.duration()])
+
+	var ai := ClassDB.instantiate("PDJE_AI") as Node
+	if ai == null:
+		return
+	add_child(ai)
+	var detector: Object = ai.CreateBeatThisDetector(
+		"res://addons/Project_DJ_Godot/onnx_models/beat_this_model_final0.onnx")
+	if detector == null:
+		_say("  (no detector)")
+		return
+	var title := path.get_file().get_basename()
+	_register(path, bpm)
+	var res: Object = detector.DetectMusic(_engine, title, COMPOSER, bpm)
+	if res == null:
+		_say("  DetectMusic returned null")
+		return
+	var beats: PackedFloat64Array = res.beats
+	if beats.size() < 2:
+		_say("  only %d beat(s) — inconclusive" % beats.size())
+		return
+	var spacing := float(beats[beats.size() - 1] - beats[0]) / float(beats.size() - 1)
+	_say("  PDJE decode: %d beats, spacing %.4f s -> %.2f BPM, last beat %.4f s" % [
+		beats.size(), spacing, 60.0 / spacing, beats[beats.size() - 1]])
+	_say("  expected spacing %.4f s at %.0f BPM -> rate ratio %.4f" % [
+		60.0 / bpm, bpm, (60.0 / bpm) / spacing])
 
 
 func _register(path: String, bpm: float) -> void:

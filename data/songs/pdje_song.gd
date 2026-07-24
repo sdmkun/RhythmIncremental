@@ -46,14 +46,20 @@ const ENGINE_PREBUFFER_FRAMES := 5328.0
 
 ## MusPanel does NOT loop: a music plays once and then stays silent. So we have
 ## to rewind each layer ourselves at the loop point.
-##
-## The cue has to be timed against the RAW counter, not the latency-compensated
-## position. A cue affects audio the engine is generating *now*, and generation
-## runs ENGINE_PREBUFFER_FRAMES ahead of the speakers. Issue it when the raw
-## counter completes the loop and generation continues seamlessly into the next
-## lap; issue it when the *audible* position completes the loop and it is a
-## whole prebuffer late, leaving a gap.
 const MANUAL_LOOP := true
+
+## How long after the *audible* loop point to issue the rewind, in frames.
+##
+## CueMusic does not queue behind the engine's prebuffer — it takes hold of what
+## is coming out of the speakers. Timing it against the raw counter therefore
+## fires a whole prebuffer early and chops ENGINE_PREBUFFER_FRAMES (0.111 s,
+## 23% of a beat at 125 BPM) off the end of every lap, which is heard as the
+## next loop stumbling in ahead of the beat. So the cue is timed against the
+## latency-compensated position instead, and this is the remaining trim.
+##
+## Raise it if the loop still arrives early, lower it (negative is fine) if a
+## gap opens up at the seam. 48 frames = 1 ms.
+const CUE_TRIM_FRAMES := 0.0
 
 var ready_to_play: bool = false
 var log_lines: Array[String] = []
@@ -205,17 +211,17 @@ func _raw_position() -> float:
 func pump(delta: float) -> void:
 	if not MANUAL_LOOP or _panel == null or _loop_length <= 0.0 or not _clock_latched:
 		return
-	var raw := _raw_position()
+	var now := position()          # audible position — see CUE_TRIM_FRAMES
 	var next_lap := _laps_cued + 1
-	var boundary := next_lap * _loop_length
-	if raw + delta * 0.5 < boundary:
+	var boundary := next_lap * _loop_length + CUE_TRIM_FRAMES / FRAME_RATE
+	if now + delta * 0.5 < boundary:
 		return
 	_laps_cued = next_lap
 	for name in _titles.keys():
 		_panel.CueMusic(_titles[name], "0")
 	if _log_cues:
-		print("[song] lap %d cued at raw %.4f s (target %.4f, %+.1f ms)" % [
-			next_lap, raw, boundary, (raw - boundary) * 1000.0])
+		print("[song] lap %d cued at audible %.4f s (target %.4f, %+.1f ms; raw %.4f)" % [
+			next_lap, now, boundary, (now - boundary) * 1000.0, _raw_position()])
 
 
 func stop() -> void:
