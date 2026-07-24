@@ -44,14 +44,21 @@ const FRAME_RATE := 48000.0     # GetConsumedFrames() is documented as /48000
 ## (lower).
 const ENGINE_PREBUFFER_FRAMES := 5328.0
 
-## MusPanel loops music on its own (undocumented, but confirmed by ear), so we
-## must NOT rewind it ourselves: GetConsumedFrames() runs ~0.111 s ahead of the
-## audible output, so a cue issued at the loop point lands a quarter of a beat
-## early and clips the end of every lap.
-const MANUAL_LOOP := false
+## MusPanel does NOT loop: a music plays once and then stays silent. So we have
+## to rewind each layer ourselves at the loop point.
+##
+## The cue has to be timed against the RAW counter, not the latency-compensated
+## position. A cue affects audio the engine is generating *now*, and generation
+## runs ENGINE_PREBUFFER_FRAMES ahead of the speakers. Issue it when the raw
+## counter completes the loop and generation continues seamlessly into the next
+## lap; issue it when the *audible* position completes the loop and it is a
+## whole prebuffer late, leaving a gap.
+const MANUAL_LOOP := true
 
 var ready_to_play: bool = false
 var log_lines: Array[String] = []
+## Print every loop cue — used by rhythm_game's --selftest.
+var _log_cues: bool = OS.get_cmdline_user_args().has("--selftest")
 
 var _engine: Node = null
 var _player: Object = null
@@ -175,18 +182,40 @@ func position() -> float:
 		for name in _titles.keys():
 			_panel.CueMusic(_titles[name], "0")
 		_frames_at_start = _consumed_frames()
-	return (_consumed_frames() - _frames_at_start - ENGINE_PREBUFFER_FRAMES) / FRAME_RATE
+	return _raw_position() - ENGINE_PREBUFFER_FRAMES / FRAME_RATE
 
 
-## Call every frame: rewinds the layers at each loop boundary.
-func pump() -> void:
-	if not MANUAL_LOOP or _panel == null or _loop_length <= 0.0:
+## Where the engine's generator is, as opposed to where the speakers are.
+## Loop cues are timed against this; note timing is not.
+func _raw_position() -> float:
+	if _player == null or not _clock_latched:
+		return 0.0
+	return (_consumed_frames() - _frames_at_start) / FRAME_RATE
+
+
+## Call every frame with the frame delta: rewinds the layers at each loop point.
+##
+## The cue can only be issued on a frame boundary, so it will never land exactly
+## on the loop point, and whatever it misses by is heard — cue late and the
+## engine emits that much silence before the next lap; cue early and it clips
+## the tail of the current one. Firing on whichever frame is *nearest* the
+## boundary rather than the first one past it halves the worst case to about
+## half a frame (~8 ms at 60 fps). The error does not accumulate: each lap is
+## cued against an absolute multiple of the loop length.
+func pump(delta: float) -> void:
+	if not MANUAL_LOOP or _panel == null or _loop_length <= 0.0 or not _clock_latched:
 		return
-	var lap := int(position() / _loop_length)
-	if lap > _laps_cued:
-		_laps_cued = lap
-		for name in _titles.keys():
-			_panel.CueMusic(_titles[name], "0")
+	var raw := _raw_position()
+	var next_lap := _laps_cued + 1
+	var boundary := next_lap * _loop_length
+	if raw + delta * 0.5 < boundary:
+		return
+	_laps_cued = next_lap
+	for name in _titles.keys():
+		_panel.CueMusic(_titles[name], "0")
+	if _log_cues:
+		print("[song] lap %d cued at raw %.4f s (target %.4f, %+.1f ms)" % [
+			next_lap, raw, boundary, (raw - boundary) * 1000.0])
 
 
 func stop() -> void:

@@ -263,11 +263,11 @@ func _make_label(pos: Vector2, font_size: int) -> Label:
 
 
 # --- Main loop ---------------------------------------------------------------
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	if _finished:
 		return
 	if _song != null:
-		_song.pump()      # rewinds the PDJE layers at each loop point
+		_song.pump(delta)     # rewinds the PDJE layers at each loop point
 	var t: float = Conductor.song_position
 	var px_per_sec := (HIT_Y - SPAWN_Y) / APPROACH_TIME
 

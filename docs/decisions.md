@@ -92,6 +92,7 @@ D-3 の調査後に判明した重要事項として、PDJE は音声側の API 
 | --- | --- |
 | `InitPlayer(FULL_MANUAL_RENDER)` + `Activate()` | ✅ |
 | `LoadMusic()` / `SetMusic()`（レイヤーのリアルタイム切替） | ✅ |
+| `CueMusic(title,"0")` | ✅ **自動ループはしないので必須** |
 | `ChangeBpm(title, 125, 120)`（タイムストレッチ） | ✅ |
 | `GetConsumedFrames()` をクロック源に | ✅ ドリフト0、`AudioStreamPlayer` より正確 |
 | `PDJE_AI` Beat This | ✅（D-1 の検証で確認済み） |
