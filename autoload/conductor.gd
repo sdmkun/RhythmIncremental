@@ -35,6 +35,11 @@ var output_latency: float = 0.0
 var loop_length: float = 0.0
 var loops_completed: int = 0
 
+## When something else owns playback (PDJE's MusPanel — see data/songs/
+## pdje_song.gd), it supplies the clock instead of the AudioStreamPlayer.
+## The callable must return monotonic seconds since playback started.
+var external_clock: Callable = Callable()
+
 var _player: AudioStreamPlayer
 var _time_began: float = 0.0
 var _length: float = 0.0
@@ -60,6 +65,7 @@ func play_song(stream: AudioStream, start_bpm: float = 120.0, song_loop_length: 
 	loop_length = maxf(song_loop_length, 0.0)
 	loops_completed = 0
 	_last_in_loop = 0.0
+	external_clock = Callable()
 	_has_stream = stream != null
 	if _has_stream:
 		_player.stream = stream
@@ -74,9 +80,17 @@ func play_song(stream: AudioStream, start_bpm: float = 120.0, song_loop_length: 
 	song_started.emit()
 
 
+## Run the clock off an external playback engine rather than our own
+## AudioStreamPlayer. `clock` returns monotonic seconds since playback started.
+func play_external(clock: Callable, start_bpm: float, song_loop_length: float) -> void:
+	play_song(null, start_bpm, song_loop_length)
+	external_clock = clock
+
+
 func stop() -> void:
 	playing = false
 	set_process(false)
+	external_clock = Callable()
 	if _player.playing:
 		_player.stop()
 
@@ -84,7 +98,12 @@ func stop() -> void:
 func _process(_delta: float) -> void:
 	if not playing:
 		return
-	if _has_stream and _player.playing:
+	if external_clock.is_valid():
+		# Already monotonic across laps, so it needs no wrap bookkeeping.
+		song_position = float(external_clock.call()) - output_latency
+		if loop_length > 0.0:
+			loops_completed = int(maxf(song_position, 0.0) / loop_length)
+	elif _has_stream and _player.playing:
 		# Prefer the audio driver's own playback position for accuracy.
 		var raw := _player.get_playback_position() \
 			+ AudioServer.get_time_since_last_mix() \

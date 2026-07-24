@@ -51,7 +51,30 @@ git 的な編集履歴まで持つ本格派。
 「保存した譜面を今の GDScript 判定で鳴らす素直な道がない（＝ Judge 採用とセットになる）」から。
 詳細は [pdje-editor.md](pdje-editor.md)。
 
-### D-4. PDJE は「音声用途」として採用する方向【2026-07-22 提案・要承認】
+### D-5. メインの曲は「レイヤー合成」で作る【2026-07-24 実装済み】
+
+`data/songs/song_data.gd` が曲の定義、`data/songs/pdje_song.gd` が再生。
+
+- **ベースレイヤー = 生成物。** キックのワンショット（`audio/sfx/`）を
+  125 BPM の拍上に8小節ぶん並べたループを焼いて（`data/audio/audio_bake.gd`）、
+  `user://cache/audio/` に書き出し、PDJE に普通の音源として登録する。
+  **譜面＝この4つ打ちそのもの**（1拍1ノート、32ノート/ループ）。
+- **追加レイヤー = スキルで解禁。** `SkillData` に `"audio_layer"` エフェクトを追加。
+  `layer_bass`（Slap Bass, 200 Beats）を取ると `SSTN_120` のベースループが乗る。
+- **BPM を揃える必要はない。** PDJE の `ChangeBpm()` が実行時に
+  120 → 125 へタイムストレッチする（音程は保たれる）。
+  → [audio-design.md](audio-design.md) の「レイヤー ON/OFF」節。
+
+これで **柱1（ジャンル変化）の技術的な土台は動いている**。
+残るのはスロット/バリアントを増やすことと、排他制約（Q-4）。
+
+### D-4. PDJE は「音声用途」として採用する方向【2026-07-24 実証済み】
+
+**当初「提案・要承認」だったが、実際に動かして採用した。**
+メインの音ゲーパートの再生は PDJE の Core/Player/MusPanel が担当している。
+判定は D-3 の通り GDScript のまま。
+
+
 
 D-3 の調査後に判明した重要事項として、PDJE は音声側の API が
 このゲームの要求とほぼ一致している:
@@ -62,6 +85,20 @@ D-3 の調査後に判明した重要事項として、PDJE は音声側の API 
 
 **音声（Core / MusPanel / FX）だけ採用し、判定と譜面DBは採用しない**
 という分離が可能。柱1・柱2の実現手段としては現状これが最有力。
+
+実証済みの項目:
+
+| API | 結果 |
+| --- | --- |
+| `InitPlayer(FULL_MANUAL_RENDER)` + `Activate()` | ✅ |
+| `LoadMusic()` / `SetMusic()`（レイヤーのリアルタイム切替） | ✅ |
+| `ChangeBpm(title, 125, 120)`（タイムストレッチ） | ✅ |
+| `GetConsumedFrames()` をクロック源に | ✅ ドリフト0、`AudioStreamPlayer` より正確 |
+| `PDJE_AI` Beat This | ✅（D-1 の検証で確認済み） |
+
+**副作用: PDJE が音声を持つので、非 Windows では音が出ない。**
+`PdjeSong.available()` が false のときは譜面だけ無音で回る
+（`scenes/rhythm/rhythm_game.gd` は生成譜面JSONにフォールバックする）。
 
 → 詳細は [audio-design.md](audio-design.md)。
 

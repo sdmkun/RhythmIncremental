@@ -35,9 +35,70 @@ Drums       ████████  ← 最初から鳴っている土台
 PDJE（`addons/Project_DJ_Godot/`）は DJ エンジンなので、この用途にほぼ理想的な API を持つ。
 **重要: 音声（Core/MusPanel/FX）だけ採用し、判定（Judge）と譜面DBは採用しない、という分離ができる。**
 
-### レイヤー ON/OFF
+### レイヤー ON/OFF 【2026-07-24 実装・稼働中】
 
 `MusPanelWrapper` は複数音源を同時ロードし、個別に ON/OFF できる。
+
+**実装済み**: `data/songs/pdje_song.gd`（`class_name PdjeSong`）が
+メインの音ゲーパートの再生を担当している。検証は
+`scenes/tools/pdje_audio_check.tscn`（`-- --auto`）。
+
+確定した最小の再生手順（すべて実行して確認済み）:
+
+```gdscript
+engine.InitEngine("user://pdje/rootdb")                  # -> true
+# 各音源を1回だけ登録（下記【落とし穴】参照）
+engine.InitPlayer(PDJE_Wrapper.FULL_MANUAL_RENDER, "void", 48)   # -> true
+var player := engine.GetPlayer(); player.Activate()      # -> true
+var panel := player.GetMusicControlPanel()               # null でない
+panel.LoadMusic(title, composer, source_bpm)             # -> 1 が成功
+panel.ChangeBpm(title, 125.0, 120.0)                     # -> true（後述）
+panel.SetMusic(title, true/false)                        # -> true。リアルタイムに切替可
+```
+
+> **【落とし穴・重要】1エンジンにつきエディタは1つで、行が残る。**
+> 2つ目の音源を同じエディタプロジェクトに通すと `render()` が内部で失敗する:
+> ```
+> failed to convert bpm to double. from editorObject render.
+> invalid stod argument
+> ```
+> しかも **`render()` の戻り値は "RENDER COMPLETE" のまま**なので気づけない。
+> 症状は後段の `LoadMusic()` が **`-2`** を返し、その音源だけ鳴らない。
+> 同梱サンプルは音源1個しか登録しないのでこの問題を踏まない。
+> → **音源ごとに別のエディタプロジェクトパスを使う**
+> （`user://pdje/editor/<title>`）。これで解決した。
+
+> **【落とし穴】タイトルは rootdb 全体で一意。** composer が違っても衝突する。
+> `scenes/tools/` の検証ツールが同じ .wav を別 composer で登録していると
+> ゲーム側の `LoadMusic()` が `-2` を返す。`PdjeSong` は `ri_` プレフィクスで
+> 名前空間を分けている。
+
+> **【判明】`GetConsumedFrames()` は String を返す**（int ではない）。
+> `float(str(...))` で受けること。値は仕様通り **/48000 で秒**。
+
+### 時計としての PDJE 【精度実測】
+
+`GetConsumedFrames()/48000` は壁時計に対して **比 1.000（ドリフトなし）**、
+起動オフセット約 +0.11 秒の定数のみ。`Conductor.play_external()` でこれを
+クロック源にしたところ、ループ境界の実測は:
+
+| 周 | 実測 t | 期待値 | ずれ |
+| ---: | ---: | ---: | ---: |
+| 2 | 15.360 | 15.360 | **0 ms** |
+| 3 | 30.720 | 30.720 | **0 ms** |
+
+`AudioStreamPlayer` 経由（`get_playback_position()`）では 4〜12 ms ずれていたので、
+**PDJE のフレームカウンタのほうが明確に正確**。
+
+> クロックのゼロ点は `start()` の最後ではなく **`position()` の初回呼び出しで確定**させ、
+> 同時に全レイヤーを `CueMusic(title,"0")` で巻き戻している。登録・ロードに
+> 0.9 秒前後かかり、その分だけ譜面が音より遅れてしまうため。
+
+> **【未確定】MusPanel がループ再生するかは非文書。** `PdjeSong.MANUAL_LOOP`
+> でループ点ごとに `CueMusic(title,"0")` を送っている（自動ループしていても
+> 0 に巻き戻すだけなので無害）。ただし送信はフレーム境界なので最大 1 フレーム
+> （約16ms）の固定オフセットが乗りうる（累積はしない）。
+> **自動ループすると判明したら `MANUAL_LOOP = false` にすればこの誤差は消える。**
 
 ```gdscript
 # FULL_MANUAL_RENDER or HYBRID_RENDER が必要
@@ -52,6 +113,16 @@ muspanel.ChangeBpm("drums_house", 140.0, 128.0)  # タイムストレッチ
 
 `ChangeBpm()` があるので、BPM の違うバリアントも後から吸収できる（が、
 最初から揃えておくほうが音質・実装ともに楽）。
+
+**`ChangeBpm()` は実際に動く【2026-07-24 確認】。**
+`SSTN_120`（120 BPM のベースループ）を 125 BPM の曲に載せるのに使っており、
+`ChangeBpm(title, 125.0, 120.0) -> true`。**リサンプリングではなくタイムストレッチ**
+なので音程は変わらない（リサンプリングだと +0.71 半音ずれ、キーのあるベースは破綻する）。
+
+呼ぶタイミングは `LoadMusic()` の直後でよい（音源が OFF の状態でも通る）。
+一度これを自前 WSOLA で実装しかけたが、**PDJE が持っている機能なので不要**。
+オフラインの合成が要るのはワンショットからループを作る場合だけ
+（`data/audio/audio_bake.gd`: キックを拍上に並べて4つ打ちループを作る用途）。
 
 ### リアルタイム FX（柱2）
 

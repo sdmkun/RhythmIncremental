@@ -74,9 +74,13 @@ func _ready() -> void:
 	var stream := _load_song()
 	_ensure_generated(APPROACH_TIME + 4.0)
 	Conductor.song_finished.connect(_on_song_finished)
-	# With no stream the Conductor still runs a clock, so the scene stays
-	# playable (silently) even if the audio file is unavailable.
-	Conductor.play_song(stream, _chart_bpm, _loop_length if _looping else 0.0)
+	if _song != null and _song.ready_to_play:
+		# PDJE owns playback, so it owns the clock too.
+		Conductor.play_external(_song.position, _chart_bpm, _loop_length)
+	else:
+		# With no stream the Conductor still runs a clock, so the scene stays
+		# playable (silently) even if the audio is unavailable.
+		Conductor.play_song(stream, _chart_bpm, _loop_length if _looping else 0.0)
 	_setup_selftest(stream)
 	set_process(true)
 
@@ -88,36 +92,50 @@ func _setup_selftest(stream: AudioStream) -> void:
 		return
 	_selftest_until = float(args[idx + 1]) if idx + 1 < args.size() else 50.0
 	print("\n########## RhythmGame selftest (%.0f s) ##########" % _selftest_until)
-	print("chart=%s bpm=%.3f loop=%s loop_length=%.4f notes/lap=%d layers=[%s] stream=%s" % [
+	print("chart=%s bpm=%.3f loop=%s loop_length=%.4f notes/lap=%d layers=[%s] audio=%s" % [
 		_chart_title, _chart_bpm, _looping, _loop_length, _pattern.size(),
 		", ".join(_layers),
-		"none" if stream == null else "%s %.4f s" % [
-			stream.get_class(), stream.get_length()]])
+		"PDJE" if _song != null else (
+			"none" if stream == null else "%s %.4f s" % [
+				stream.get_class(), stream.get_length()])])
 
 
 # --- Setup -------------------------------------------------------------------
 var _chart_bpm := 120.0
 var _layers: PackedStringArray = PackedStringArray()
+var _song: PdjeSong = null
 
 
-## Assemble the song from SongData (kick pulse + whatever layers the player's
-## skills have switched on). Falls back to the JSON chart pipeline if the source
-## audio is unavailable, so the scene is never dead.
+## Start the song: SongData defines the layers, PdjeSong plays them through
+## PDJE's MusPanel (which time-stretches off-tempo layers in realtime). Falls
+## back to the generated JSON chart if PDJE cannot start, so the scene is never
+## dead — the fallback plays silently, since fitting a 120 BPM layer to a
+## 125 BPM track is exactly what we are relying on PDJE for.
 func _load_song() -> AudioStream:
-	var song := SongData.build(GameState.upgrade_levels)
-	for line in song["log"]:
-		print("[song] %s" % line)
-	if not song["ok"]:
-		push_warning("SongData could not build (see log) — falling back to the JSON chart.")
+	var layers := SongData.layer_table(GameState.upgrade_levels)
+	if layers.is_empty():
+		push_warning("SongData has no layers — falling back to the JSON chart.")
 		return _load_chart()
 
-	_chart_bpm = float(song["bpm"])
-	_chart_title = String(song["title"])
-	_loop_length = float(song["loop_length"])
-	_looping = _loop_length > 0.0
-	_layers = song["layers"]
-	_pattern = song["notes"]
-	return song["stream"]
+	_chart_bpm = SongData.BPM
+	_chart_title = SongData.TITLE
+	_loop_length = SongData.loop_seconds()
+	_looping = true
+	_pattern = SongData.chart()
+
+	_song = PdjeSong.new()
+	_song.name = "PdjeSong"
+	add_child(_song)
+	var started := _song.start(layers, SongData.BPM, _loop_length)
+	for line in _song.log_lines:
+		print("[song] %s" % line)
+	if not started:
+		push_warning("PDJE could not start — the chart plays, but silently.")
+		_song.queue_free()
+		_song = null
+		return null
+	_layers = _song.active_layers()
+	return null
 
 
 ## Reads a generated chart JSON and returns the AudioStream to play with it.
@@ -248,6 +266,8 @@ func _make_label(pos: Vector2, font_size: int) -> Label:
 func _process(_delta: float) -> void:
 	if _finished:
 		return
+	if _song != null:
+		_song.pump()      # rewinds the PDJE layers at each loop point
 	var t: float = Conductor.song_position
 	var px_per_sec := (HIT_Y - SPAWN_Y) / APPROACH_TIME
 
@@ -421,6 +441,8 @@ func _end_run() -> void:
 		return
 	_finished = true
 	Conductor.stop()
+	if _song != null:
+		_song.stop()
 	for note in _active:
 		if note["node"]:
 			note["node"].queue_free()

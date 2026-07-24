@@ -105,13 +105,26 @@ func _run() -> void:
 	_say("loaded list (after) = %s" % str(_panel.GetLoadedMusicList()))
 
 	# The timed script below drives the actual questions.
+	# ChangeBpm returns false when called right after LoadMusic but true when
+	# called seconds later, so something has to settle first. Bisect what:
+	# is it "the music must be ON", or simply elapsed time?
+	_say("ChangeBpm straight after LoadMusic (music still OFF) -> %s"
+		% _panel.ChangeBpm(bass_title, TARGET_BPM, BASS_BPM))
+	_panel.SetMusic(bass_title, true)
+	_say("ChangeBpm same frame as SetMusic(on) -> %s"
+		% _panel.ChangeBpm(bass_title, TARGET_BPM, BASS_BPM))
+	await get_tree().process_frame
+	_say("ChangeBpm one frame later -> %s"
+		% _panel.ChangeBpm(bass_title, TARGET_BPM, BASS_BPM))
+
 	_steps = [
-		{"at": 0.0, "what": "kick ON", "do": func(): _say("  SetMusic(kick,true) -> %s" % _panel.SetMusic(kick_title, true))},
-		{"at": 4.0, "what": "bass ON at its native 120 BPM", "do": func(): _say("  SetMusic(bass,true) -> %s" % _panel.SetMusic(bass_title, true))},
-		{"at": 8.0, "what": "ChangeBpm(bass, 125, 120) — realtime stretch", "do": func(): _say("  ChangeBpm -> %s" % _panel.ChangeBpm(bass_title, TARGET_BPM, BASS_BPM))},
-		{"at": 14.0, "what": "bass OFF (layer toggle)", "do": func(): _say("  SetMusic(bass,false) -> %s" % _panel.SetMusic(bass_title, false))},
-		{"at": 17.0, "what": "bass ON again", "do": func(): _say("  SetMusic(bass,true) -> %s" % _panel.SetMusic(bass_title, true))},
-		{"at": 24.0, "what": "done", "do": func(): _finish(0)},
+		{"at": 0.5, "what": "ChangeBpm @0.5s", "do": func(): _say("  -> %s" % _panel.ChangeBpm(bass_title, TARGET_BPM, BASS_BPM))},
+		{"at": 1.0, "what": "ChangeBpm @1.0s", "do": func(): _say("  -> %s" % _panel.ChangeBpm(bass_title, TARGET_BPM, BASS_BPM))},
+		{"at": 2.0, "what": "ChangeBpm @2.0s", "do": func(): _say("  -> %s" % _panel.ChangeBpm(bass_title, TARGET_BPM, BASS_BPM))},
+		{"at": 4.0, "what": "ChangeBpm @4.0s", "do": func(): _say("  -> %s" % _panel.ChangeBpm(bass_title, TARGET_BPM, BASS_BPM))},
+		{"at": 6.0, "what": "ChangeBpm @6.0s", "do": func(): _say("  -> %s" % _panel.ChangeBpm(bass_title, TARGET_BPM, BASS_BPM))},
+		{"at": 8.0, "what": "kick ON too (two layers)", "do": func(): _say("  SetMusic(kick,true) -> %s" % _panel.SetMusic(kick_title, true))},
+		{"at": 10.0, "what": "done", "do": func(): _finish(0)},
 	]
 	_t0 = Time.get_ticks_msec() / 1000.0
 	_say("\n--- timeline (watch whether consumed frames advance) ---")
@@ -150,9 +163,12 @@ func _process(_delta: float) -> void:
 	# the wall clock, since a stalled counter means playback never started.
 	if t - _last_report >= 2.0:
 		_last_report = t
-		var frames: int = _player.GetConsumedFrames()
-		_say("        consumed=%d  (=%.2f s @48k)  wall=%.2f s" % [
-			frames, float(frames) / 48000.0, t])
+		# NOTE: the wrapper returns this as a String, not an int.
+		var raw: Variant = _player.GetConsumedFrames()
+		var frames := float(str(raw))
+		_say("        consumed=%s (%s)  =%.2f s @48k  wall=%.2f s  ratio=%.4f" % [
+			str(raw), type_string(typeof(raw)), frames / 48000.0, t,
+			(frames / 48000.0) / maxf(t, 0.001)])
 
 
 func _finish(code: int) -> void:
