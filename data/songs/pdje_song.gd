@@ -30,11 +30,25 @@ const TITLE_PREFIX := "ri_"
 const FULL_MANUAL_RENDER_FALLBACK := 2
 const FRAME_RATE := 48000.0     # GetConsumedFrames() is documented as /48000
 
-## PDJE does not document loop playback and MusPanel has no loop flag, so we
-## rewind each layer ourselves at the loop point. Cueing to 0 exactly when the
-## music would wrap to 0 anyway is harmless, so this is safe whether or not
-## PDJE also loops on its own.
-const MANUAL_LOOP := true
+## GetConsumedFrames() counts frames the engine has *generated*, which is a
+## fixed prebuffer ahead of what has reached the speakers. Measured in
+## scenes/tools/pdje_audio_check.tscn: the counter sits exactly 5328 frames
+## (0.111 s) above wall-clock, constant across 23 s and across runs. That is
+## 23% of a beat at 125 BPM, so uncorrected it makes every note read as landing
+## before its kick.
+##
+## Not auto-measured: the counter does not advance linearly between Activate()
+## and the first frame, because registration and ChangeBpm() block. It is a
+## property of the frame buffer size handed to InitPlayer(), so it only needs
+## revisiting if that changes. Tune by ear if notes feel early (raise) or late
+## (lower).
+const ENGINE_PREBUFFER_FRAMES := 5328.0
+
+## MusPanel loops music on its own (undocumented, but confirmed by ear), so we
+## must NOT rewind it ourselves: GetConsumedFrames() runs ~0.111 s ahead of the
+## audible output, so a cue issued at the loop point lands a quarter of a beat
+## early and clips the end of every lap.
+const MANUAL_LOOP := false
 
 var ready_to_play: bool = false
 var log_lines: Array[String] = []
@@ -142,13 +156,17 @@ func active_layers() -> PackedStringArray:
 	return out
 
 
-## Seconds since playback started. Monotonic — it keeps rising across laps, so
-## it drops straight into Conductor.song_position.
+## Seconds of *audible* song, i.e. already latency-compensated. Monotonic — it
+## keeps rising across laps, so it drops straight into Conductor.song_position.
 ##
-## The zero point is latched on the first call rather than at the end of
-## start(), and every layer is rewound at that same instant. Registering and
-## loading takes a variable ~0.9 s, and anything measured before the first frame
-## would leave the chart running that far behind the audio.
+## Two corrections are folded in here:
+##
+##   - The zero point is latched on the first call rather than at the end of
+##     start(), with every layer rewound at that same instant. Registering and
+##     loading takes a variable ~0.9 s, and measuring before the first frame
+##     leaves the chart that far behind the audio.
+##   - ENGINE_PREBUFFER_FRAMES is subtracted, so what comes back is where the
+##     song is in the speakers rather than in the engine's buffer.
 func position() -> float:
 	if _player == null:
 		return 0.0
@@ -157,7 +175,7 @@ func position() -> float:
 		for name in _titles.keys():
 			_panel.CueMusic(_titles[name], "0")
 		_frames_at_start = _consumed_frames()
-	return (_consumed_frames() - _frames_at_start) / FRAME_RATE
+	return (_consumed_frames() - _frames_at_start - ENGINE_PREBUFFER_FRAMES) / FRAME_RATE
 
 
 ## Call every frame: rewinds the layers at each loop boundary.

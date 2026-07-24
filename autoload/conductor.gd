@@ -99,8 +99,11 @@ func _process(_delta: float) -> void:
 	if not playing:
 		return
 	if external_clock.is_valid():
-		# Already monotonic across laps, so it needs no wrap bookkeeping.
-		song_position = float(external_clock.call()) - output_latency
+		# Monotonic across laps, so it needs no wrap bookkeeping. output_latency
+		# is NOT applied: it describes Godot's own audio device, which has
+		# nothing to do with an external engine's output path, and the external
+		# clock is expected to hand back an already-compensated position.
+		song_position = float(external_clock.call())
 		if loop_length > 0.0:
 			loops_completed = int(maxf(song_position, 0.0) / loop_length)
 	elif _has_stream and _player.playing:
