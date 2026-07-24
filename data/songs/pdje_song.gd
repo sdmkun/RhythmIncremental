@@ -70,7 +70,8 @@ var _engine: Node = null
 var _player: Object = null
 var _panel: Object = null
 var _titles: Dictionary = {}     # layer name (StringName) -> PDJE music title
-var _on: Dictionary = {}         # layer name -> bool
+var _on: Dictionary = {}         # layer name -> currently audible?
+var _wanted: Dictionary = {}     # layer name -> should be on once the clock starts
 var _frames_at_start := 0.0
 var _clock_latched := false
 var _loop_length := 0.0
@@ -130,13 +131,6 @@ func start(layers: Dictionary, song_bpm: float, loop_length: float) -> bool:
 		_note("LoadMusic(%s, %s) -> %s" % [_titles[name], COMPOSER, loaded])
 	_note("loaded list = %s" % str(_panel.GetLoadedMusicList()))
 
-	# ChangeBpm only takes on music that is switched ON — called on an inactive
-	# title it just returns false. So every layer goes on, gets stretched, and
-	# only then is switched back off if the player has not unlocked it. This all
-	# happens in one frame, well inside the engine's ~0.11 s output latency, so
-	# nothing leaks out of the speakers.
-	for name in _titles.keys():
-		_panel.SetMusic(_titles[name], true)
 	for name in _titles.keys():
 		var src_bpm := float(layers[name]["source_bpm"])
 		if is_equal_approx(src_bpm, song_bpm):
@@ -145,26 +139,43 @@ func start(layers: Dictionary, song_bpm: float, loop_length: float) -> bool:
 		var ok: bool = _panel.ChangeBpm(_titles[name], song_bpm, src_bpm)
 		_note("%s: ChangeBpm %.0f -> %.0f BPM = %s" % [name, src_bpm, song_bpm, ok])
 
+	# Everything stays SILENT until the clock is latched. LoadMusic leaves a
+	# title playable, and registration plus loading takes ~0.9 s of wall time —
+	# long enough for two beats of the loop to be heard before the clock starts.
+	# Those beats used to leak out and then get cut off by the latch's rewind,
+	# which sounded like a stumble right at the top of the first lap.
 	for name in _titles.keys():
-		set_layer(name, bool(layers[name]["on"]))
+		_panel.SetMusic(_titles[name], false)
+		_on[name] = false
+		_wanted[name] = bool(layers[name]["on"])
 
 	ready_to_play = true
-	_note("playing: %s" % ", ".join(active_layers()))
+	var wanted := PackedStringArray()
+	for name in _wanted.keys():
+		if _wanted[name]:
+			wanted.append(String(name))
+	_note("armed (silent until the clock starts): %s" % ", ".join(wanted))
 	return true
 
 
 ## Switch a layer on or off. Safe to call mid-song — that is the point.
+## Before the clock is latched this only records the intent, so that arming the
+## song cannot make it audible early.
 func set_layer(name: StringName, on: bool) -> void:
 	if _panel == null or not _titles.has(name):
+		return
+	_wanted[name] = on
+	if not _clock_latched:
 		return
 	_panel.SetMusic(_titles[name], on)
 	_on[name] = on
 
 
+## The layers the song is playing (or is armed to play).
 func active_layers() -> PackedStringArray:
 	var out := PackedStringArray()
-	for name in _on.keys():
-		if _on[name]:
+	for name in _wanted.keys():
+		if _wanted[name]:
 			out.append(String(name))
 	return out
 
@@ -185,9 +196,15 @@ func position() -> float:
 		return 0.0
 	if not _clock_latched:
 		_clock_latched = true
+		# Rewind to the top and unmute in the same instant, so the song's first
+		# sample and the chart's t=0 are the same moment.
 		for name in _titles.keys():
 			_panel.CueMusic(_titles[name], "0")
 		_frames_at_start = _consumed_frames()
+		for name in _titles.keys():
+			var on := bool(_wanted.get(name, false))
+			_panel.SetMusic(_titles[name], on)
+			_on[name] = on
 	return _raw_position() - ENGINE_PREBUFFER_FRAMES / FRAME_RATE
 
 
