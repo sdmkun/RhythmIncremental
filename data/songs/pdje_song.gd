@@ -119,7 +119,14 @@ func start(layers: Dictionary, song_bpm: float, loop_length: float) -> bool:
 	if mode == 0:
 		mode = FULL_MANUAL_RENDER_FALLBACK
 	if not _engine.InitPlayer(mode, "void", PLAYER_FRAME_BUFFER):
-		_note("InitPlayer failed")
+		# Almost always the output device, not PDJE. Both PDJE and Godot's own
+		# WASAPI backend fail the same way when something else holds the default
+		# device in exclusive mode (0x8889000A AUDCLNT_E_DEVICE_IN_USE) — a
+		# virtual mixer like Voicemeeter, or a DAW with an ASIO driver.
+		_note("InitPlayer failed — no usable output device.")
+		_note("  Check logs/pdjeLog.txt. If Godot also reports 'WASAPI: Initialize")
+		_note("  failed', the device is taken: close the app holding it, or turn off")
+		_note("  'Give exclusive mode applications priority' for the default device.")
 		return false
 	_player = _engine.GetPlayer()
 	if _player == null or not _player.Activate():
