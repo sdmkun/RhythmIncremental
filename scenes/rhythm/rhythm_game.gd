@@ -104,6 +104,7 @@ func _setup_selftest(stream: AudioStream) -> void:
 var _chart_bpm := 120.0
 var _layers: PackedStringArray = PackedStringArray()
 var _song: PdjeSong = null
+var _audio_failed := false
 
 
 ## Start the song: SongData defines the layers, PdjeSong plays them through
@@ -130,12 +131,48 @@ func _load_song() -> AudioStream:
 	for line in _song.log_lines:
 		print("[song] %s" % line)
 	if not started:
-		push_warning("PDJE could not start — the chart plays, but silently.")
+		push_warning("PDJE could not start — the chart plays, but silently. R to retry.")
 		_song.queue_free()
 		_song = null
+		_audio_failed = true
 		return null
 	_layers = _song.active_layers()
 	return null
+
+
+## Rebuild the audio engine from scratch. PDJE grabs the output device once, at
+## InitPlayer, so switching the default device while the game runs leaves it
+## holding a dead handle (or none, if the device was busy at startup). Retrying
+## is the only way back without relaunching — hence the R key.
+func _retry_audio() -> void:
+	if _finished:
+		return
+	print("[song] retrying audio...")
+	if _song != null:
+		_song.stop()
+		_song.queue_free()
+		_song = null
+	_audio_failed = false
+	# The chart keeps its own timeline; only the audio side restarts, so the run
+	# in progress is not disturbed beyond the song jumping back to its start.
+	_load_song()
+	if _song != null and _song.ready_to_play:
+		Conductor.play_external(_song.position, _chart_bpm, _loop_length)
+		_pending.clear()
+		_for_each_active_free()
+		_laps_generated = 0
+		_ensure_generated(APPROACH_TIME + 4.0)
+		print("[song] audio restarted — layers: %s" % ", ".join(_layers))
+	else:
+		print("[song] still no audio device.")
+	_refresh_hud()
+
+
+func _for_each_active_free() -> void:
+	for note in _active:
+		if note["node"]:
+			note["node"].queue_free()
+	_active.clear()
 
 
 ## Reads a generated chart JSON and returns the AudioStream to play with it.
@@ -353,6 +390,10 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	if _finished:
 		return
+	if event is InputEventKey and event.pressed and not event.echo \
+			and (event as InputEventKey).keycode == KEY_R:
+		_retry_audio()
+		return
 	for lane in range(LANE_COUNT):
 		if event.is_action_pressed("lane_%d" % lane):
 			_judge_lane(lane)
@@ -423,11 +464,16 @@ func _refresh_hud() -> void:
 
 
 func _refresh_lap() -> void:
+	if _audio_failed:
+		_song_label.add_theme_color_override("font_color", Color("#ff5964"))
+		_song_label.text = "NO AUDIO DEVICE — switch your output device, then press R to retry."
+		return
+	_song_label.add_theme_color_override("font_color", Color.WHITE)
 	if not _looping:
 		_song_label.text = "%s  —  %.0f BPM" % [_chart_title, _chart_bpm]
 		return
-	var layers := "kick" if _layers.is_empty() else "kick + " + ", ".join(_layers)
-	_song_label.text = "%s  —  %.2f BPM  /  loop %d  /  layers: %s  (endless — Esc to finish)" % [
+	var layers := ", ".join(_layers) if not _layers.is_empty() else "(silent)"
+	_song_label.text = "%s  —  %.2f BPM  /  loop %d  /  layers: %s  (Esc to finish, R to restart audio)" % [
 		_chart_title, _chart_bpm, Conductor.loops_completed + 1, layers]
 
 
