@@ -15,6 +15,9 @@ class_name SkillData
 #   "audio_layer" -> switches on the SongData layer named by "layer" (pillar 1:
 #                    the song itself grows as you spend Beats). No numeric
 #                    effect, so it is skipped by GameState._recompute_multipliers.
+#   "hold_notes"  -> puts long notes in the chart; holding one runs a lowpass
+#                    over a layer (pillar 2: play drives realtime FX). Also
+#                    purely a flag, with no numeric effect.
 const DEFS := {
 	&"multiplier_1": {
 		"name": "Groove Amp I",
@@ -50,6 +53,20 @@ const DEFS := {
 		"effect": "audio_layer", "layer": &"bass", "per_level": 0.0, "max_level": 1,
 		"base_cost": 200, "cost_growth": 1.0,
 		"requires": [&"multiplier_1"],
+	},
+	&"layer_melodic": {
+		"name": "Jazz Piano",
+		"desc": "Adds a stuttering jazz piano on top.",
+		"effect": "audio_layer", "layer": &"melodic", "per_level": 0.0, "max_level": 1,
+		"base_cost": 500, "cost_growth": 1.0,
+		"requires": [&"layer_bass"],
+	},
+	&"hold_notes": {
+		"name": "Filter Sweep",
+		"desc": "Adds long notes. Hold the key to muffle the piano with a lowpass filter.",
+		"effect": "hold_notes", "per_level": 0.0, "max_level": 1,
+		"base_cost": 800, "cost_growth": 1.0,
+		"requires": [&"layer_melodic"],
 	},
 }
 

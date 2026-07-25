@@ -112,19 +112,82 @@ func _run() -> void:
 	_say("loaded list (after) = %s" % str(_panel.GetLoadedMusicList()))
 
 	# The timed script below drives the actual questions.
-	# Play both layers so the buffer is under a realistic load (two musics, one
-	# of them being time-stretched), and watch how far the counter runs ahead of
-	# wall-clock — that gap is the engine's buffer depth.
+	# --- FX probe: the docs and the shipped example disagree on how to reach the
+	# FX enum (EnumWrapper.PDJE_FX_LIST.FILTER vs EnumWrapper.FILTER), and the
+	# arg keys are case-sensitive with no authoritative list. Settle both here.
+	_probe_fx(bass_title)
+
 	_panel.SetMusic(kick_title, true)
 	_panel.ChangeBpm(bass_title, TARGET_BPM, BASS_BPM)
 	_panel.SetMusic(bass_title, true)
 	_t0 = Time.get_ticks_msec() / 1000.0
-	_steps = [{"at": 12.0, "what": "done", "do": func(): _finish(0)}]
+
+	# Sweep the cutoff down and back up: if a lowpass is really engaged the bass
+	# should go muffled and then open up again.
+	_steps = [
+		{"at": 1.0, "what": "lowpass ON, cutoff 20000 (open)", "do": func(): _set_filter(bass_title, 20000.0)},
+		{"at": 3.0, "what": "cutoff 800 (muffled)", "do": func(): _set_filter(bass_title, 800.0)},
+		{"at": 6.0, "what": "cutoff 300 (very muffled)", "do": func(): _set_filter(bass_title, 300.0)},
+		{"at": 9.0, "what": "cutoff 20000 (open again)", "do": func(): _set_filter(bass_title, 20000.0)},
+		{"at": 12.0, "what": "filter OFF", "do": func(): _filter_off(bass_title)},
+		{"at": 15.0, "what": "done", "do": func(): _finish(0)},
+	]
 	set_process(true)
 	return
 	_t0 = Time.get_ticks_msec() / 1000.0
 	_say("\n--- timeline (watch whether consumed frames advance) ---")
 	set_process(true)
+
+
+var _fx: Object = null        # FXWrapper
+var _fx_args: Object = null   # FXArgWrapper
+var _fx_filter: int = -1      # resolved FILTER enum value
+
+
+## Work out how to reach the FX enum and what the FILTER arg keys are called.
+func _probe_fx(title: String) -> void:
+	_say("\n--- FX probe on %s ---" % title)
+
+	# The enum lives on a class we cannot name directly (ClassDB-only access),
+	# so try both documented spellings.
+	var flat := ClassDB.class_get_integer_constant("EnumWrapper", "FILTER")
+	_say("  EnumWrapper.FILTER = %s" % flat)
+	var listed := ClassDB.class_get_integer_constant("EnumWrapper", "PDJE_FX_LIST_FILTER")
+	_say("  EnumWrapper.PDJE_FX_LIST_FILTER = %s" % listed)
+	var names := ClassDB.class_get_integer_constant_list("EnumWrapper", true)
+	_say("  EnumWrapper constants (first 24): %s" % str(names.slice(0, 24)))
+	_fx_filter = flat
+
+	_fx = _panel.getFXHandle(title)
+	if _fx == null:
+		_say("  getFXHandle() returned null")
+		return
+	_say("  getFXHandle OK")
+	_fx.FX_ON_OFF(_fx_filter, true)
+	_fx_args = _fx.GetArgSetter()
+	if _fx_args == null:
+		_say("  GetArgSetter() returned null")
+		return
+	_say("  FILTER arg keys = %s" % str(_fx_args.GetFXArgKeys(_fx_filter)))
+
+
+## HLswitch picks the filter type: the editor mix table lists HIGH(0)/LOW(2),
+## so 2 is the lowpass we want for the hold mechanic.
+func _set_filter(title: String, freq: float) -> void:
+	if _fx_args == null:
+		_say("  (no FX handle)")
+		return
+	_fx.FX_ON_OFF(_fx_filter, true)
+	_fx_args.SetFXArg(_fx_filter, "HLswitch", 2)
+	_fx_args.SetFXArg(_fx_filter, "Filterfreq", freq)
+	_say("  SetFXArg(FILTER, Filterfreq, %.0f)" % freq)
+
+
+func _filter_off(title: String) -> void:
+	if _fx == null:
+		return
+	_fx.FX_ON_OFF(_fx_filter, false)
+	_say("  FX_ON_OFF(FILTER, false)")
 
 
 ## Compare the file as WE read it against the beats PDJE's decoder produces.

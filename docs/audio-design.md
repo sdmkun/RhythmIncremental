@@ -209,6 +209,47 @@ args.SetFXArg(EnumWrapper.PDJE_FX_LIST.FILTER, "Filterfreq", 800.0)
 > 正確なキー一覧は https://rliop913.github.io/Project-DJ-Engine-Docs/FX_ARGS.html
 > を実装時に必ず参照すること。`GetFXArgKeys(fx)` で実行時に列挙もできる。
 
+### FX の実測【2026-07-25 確認・稼働中】
+
+`scenes/tools/pdje_audio_check.tscn` で実測。**ドキュメントと実物が食い違うので注意。**
+
+> **【落とし穴】列挙型はフラット。`EnumWrapper.FILTER` であって
+> `EnumWrapper.PDJE_FX_LIST.FILTER` ではない**（後者は存在しない）。
+> エージェントドキュメントの表記は誤り。同梱サンプル
+> `config_and_play_with_realtime_FX.gd` のほうが正しい。
+
+> **【落とし穴】リアルタイムFXの番号は、エディタの mix args 表の番号とは別物。**
+> mix 表では `FILTER(0)` だが、**リアルタイムでは `FILTER = 4`**。混同するとまったく
+> 別のFXがかかる。
+
+実機で列挙した定数（13種。ドキュメントの「18種」とは一致しない）:
+
+```
+COMPRESSOR DISTORTION ECHO EQ FILTER FLANGER OCSFILTER
+PANNER PHASER ROBOT ROLL TRANCE VOL
+```
+
+`FILTER` の引数キーは `GetFXArgKeys()` の実測で **2つだけ**:
+
+| キー | 意味 |
+| --- | --- |
+| `HLswitch` | フィルタ種別。`0` = ハイパス、`2` = ローパス（エディタ mix 表の `HIGH(0)/LOW(2)` と同じ規約） |
+| `Filterfreq` | カットオフ周波数（Hz） |
+
+使い方（`data/songs/pdje_song.gd::set_layer_filter()`）:
+
+```gdscript
+var fx := panel.getFXHandle(title)      # 音源ごとに取得。null チェック必須
+fx.FX_ON_OFF(EnumWrapper.FILTER, true)
+var args := fx.GetArgSetter()
+args.SetFXArg(EnumWrapper.FILTER, "HLswitch", 2)      # ローパス
+args.SetFXArg(EnumWrapper.FILTER, "Filterfreq", 500.0)
+```
+
+- ハンドルは**音源ごと**。`LoadMusic()` 後でないと取れないので遅延取得＋キャッシュしている。
+- OFF に戻すときはカットオフを可聴域外（20000Hz）に開いてから `FX_ON_OFF(false)`。
+  こうすると ON/OFF の瞬間が聞こえない。
+
 ### ビート検出（自動譜面化の鍵）
 
 PDJE は Beat This モデル（ONNX）を同梱しており、**任意の音源からビート／ダウンビートの

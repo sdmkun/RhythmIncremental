@@ -35,7 +35,19 @@ const LAYERS := {
 		"path": "res://audio/loops/SSTN_120_G#_BassLoops_FunkySlapBassLayered.wav",
 		"source_bpm": 120.0,
 	},
+	&"melodic": {
+		"skill": &"layer_melodic",
+		"path": "res://audio/loops/SSTN_125_D_MelodicLoops_Jazz_Piano_Stutters.wav",
+		"source_bpm": 125.0,      # already on tempo — no ChangeBpm needed
+	},
 }
+
+## The layer a hold note filters. Holds are gated behind the skill that adds
+## this layer, so there is always something to filter.
+const HOLD_FILTER_LAYER := &"melodic"
+## Cutoff applied while a hold note is held down, in Hz. Low enough to be
+## obviously muffled without making the layer vanish.
+const HOLD_FILTER_HZ := 500.0
 
 
 static func beats_per_loop() -> int:
@@ -75,16 +87,41 @@ static func layer_for_skill(id: StringName) -> StringName:
 	return &""
 
 
+## Bars (0-based) whose last two beats fuse into one held note, once the player
+## owns the hold skill. Spaced half a loop apart so each 8-bar lap has two.
+const HOLD_BARS := [3, 7]
+const HOLD_BEATS := 2
+
 ## Four-on-the-floor: a note on every beat, i.e. every 4th 16th-note step.
-static func chart() -> Array:
+## With `holds` enabled, the last two beats of HOLD_BARS fuse into a single
+## note carrying a `hold` duration — the tap on the second of those beats is
+## absorbed rather than added, so the hand is never asked to do two things.
+static func chart(holds: bool = false) -> Array:
 	var steps := PackedInt32Array()
 	for b in beats_per_loop():
 		steps.append(b * BeatGrid.STEPS_PER_BEAT)
+	# Lanes are assigned over the full beat grid regardless of holds, so turning
+	# the skill on never reshuffles the taps the player already knows.
 	var lanes := BeatGrid.assign_lanes(steps, TITLE, LANE_COUNT)
+
+	var hold_start := {}
+	var absorbed := {}
+	if holds:
+		for bar in HOLD_BARS:
+			var beat_index: int = bar * BEATS_PER_BAR + (BEATS_PER_BAR - HOLD_BEATS)
+			hold_start[beat_index] = true
+			for k in range(1, HOLD_BEATS):
+				absorbed[beat_index + k] = true
+
 	var notes: Array = []
 	var beat := beat_seconds()
 	for i in steps.size():
-		notes.append({"time": i * beat, "lane": lanes[i], "step": steps[i]})
+		if absorbed.has(i):
+			continue
+		var note := {"time": i * beat, "lane": lanes[i], "step": steps[i], "hold": 0.0}
+		if hold_start.has(i):
+			note["hold"] = HOLD_BEATS * beat
+		notes.append(note)
 	return notes
 
 

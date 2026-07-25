@@ -55,6 +55,24 @@ const ENGINE_PREBUFFER_FRAMES := 5328.0
 ## to rewind each layer ourselves at the loop point.
 const MANUAL_LOOP := true
 
+## Realtime FX. The enum lives on EnumWrapper as a FLAT constant — the
+## `EnumWrapper.PDJE_FX_LIST.FILTER` spelling in the agent docs does not exist,
+## and this enum is NOT the one in the editor's mix-args table (which numbers
+## FILTER as 0). Probed values: COMPRESSOR DISTORTION ECHO EQ FILTER FLANGER
+## OCSFILTER PANNER PHASER ROBOT ROLL TRANCE VOL, with FILTER = 4.
+## Resolved through ClassDB at runtime, with the probed value as the fallback.
+const FX_FILTER_FALLBACK := 4
+## FILTER takes exactly two args (confirmed via GetFXArgKeys): the type switch
+## and the cutoff. The editor mix table documents the type as HIGH(0)/LOW(2),
+## and the shipped example comments `HLswitch, 0` as "highpass" — so 2 is the
+## lowpass. Flip this if it turns out to sound like a highpass.
+const FILTER_LOWPASS := 2
+const FILTER_KEY_TYPE := "HLswitch"
+const FILTER_KEY_FREQ := "Filterfreq"
+## Cutoff in Hz with the filter disengaged. Well above hearing, so "off" and
+## "wide open" sound the same and the transition is inaudible.
+const FILTER_OPEN_HZ := 20000.0
+
 ## Trim on the loop rewind, in frames. Raise it if the next lap arrives early,
 ## lower it (negative is fine) if a gap opens at the seam. 48 frames = 1 ms.
 ##
@@ -76,6 +94,9 @@ var _panel: Object = null
 var _titles: Dictionary = {}     # layer name (StringName) -> PDJE music title
 var _on: Dictionary = {}         # layer name -> currently audible?
 var _wanted: Dictionary = {}     # layer name -> should be on once the clock starts
+var _fx: Dictionary = {}         # layer name -> FXWrapper
+var _fx_args: Dictionary = {}    # layer name -> FXArgWrapper
+var _filtered: Dictionary = {}   # layer name -> filter currently engaged?
 var _frames_at_start := 0.0
 var _clock_latched := false
 var _loop_length := 0.0
@@ -180,6 +201,42 @@ func set_layer(name: StringName, on: bool) -> void:
 		return
 	_panel.SetMusic(_titles[name], on)
 	_on[name] = on
+
+
+## Sweep a lowpass onto one layer, or open it back up. `cutoff` is in Hz;
+## anything at or above FILTER_OPEN_HZ disengages the filter entirely.
+##
+## The FX handle is fetched lazily and cached: getFXHandle() only works once the
+## music is loaded, and re-fetching it per frame would be wasteful for something
+## a hold note hits every frame it is held.
+func set_layer_filter(name: StringName, cutoff: float) -> void:
+	if _panel == null or not _titles.has(name):
+		return
+	var engage := cutoff < FILTER_OPEN_HZ
+	if not _fx.has(name):
+		var handle: Object = _panel.getFXHandle(_titles[name])
+		if handle == null:
+			_note("getFXHandle(%s) returned null — no filter on this layer" % name)
+			_fx[name] = null
+			return
+		_fx[name] = handle
+		_fx_args[name] = handle.GetArgSetter()
+	var handle: Object = _fx[name]
+	var args: Object = _fx_args.get(name)
+	if handle == null or args == null:
+		return
+
+	if engage != bool(_filtered.get(name, false)):
+		handle.FX_ON_OFF(_fx_filter(), engage)
+		_filtered[name] = engage
+	if engage:
+		args.SetFXArg(_fx_filter(), FILTER_KEY_TYPE, FILTER_LOWPASS)
+		args.SetFXArg(_fx_filter(), FILTER_KEY_FREQ, cutoff)
+
+
+func _fx_filter() -> int:
+	var v := ClassDB.class_get_integer_constant("EnumWrapper", "FILTER")
+	return v if v != 0 else FX_FILTER_FALLBACK
 
 
 ## The layers the song is playing (or is armed to play).

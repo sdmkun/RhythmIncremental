@@ -14,6 +14,8 @@ const NODE_LAYOUT := {
 	&"window_1": {"pos": Vector2(200, 0), "root": false},
 	&"multiplier_2": {"pos": Vector2(0, 180), "root": false},
 	&"layer_bass": {"pos": Vector2(-420, -180), "root": false},
+	&"layer_melodic": {"pos": Vector2(-420, 0), "root": false},
+	&"hold_notes": {"pos": Vector2(-420, 180), "root": false},
 }
 
 var _beats_label: Label

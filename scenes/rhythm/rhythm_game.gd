@@ -57,6 +57,9 @@ var misses := 0
 ## Observation only — it never presses anything.
 var _selftest_until := 0.0
 var _selftest_lap := -1
+var _autoplay := false
+var holds_completed := 0
+var holds_broken := 0
 
 var _hud: CanvasLayer
 var _score_label: Label
@@ -91,6 +94,7 @@ func _setup_selftest(stream: AudioStream) -> void:
 	if idx < 0:
 		return
 	_selftest_until = float(args[idx + 1]) if idx + 1 < args.size() else 50.0
+	_autoplay = args.has("--autoplay")
 	print("\n########## RhythmGame selftest (%.0f s) ##########" % _selftest_until)
 	print("chart=%s bpm=%.3f loop=%s loop_length=%.4f notes/lap=%d layers=[%s] audio=%s" % [
 		_chart_title, _chart_bpm, _looping, _loop_length, _pattern.size(),
@@ -105,6 +109,10 @@ var _chart_bpm := 120.0
 var _layers: PackedStringArray = PackedStringArray()
 var _song: PdjeSong = null
 var _audio_failed := false
+var _holds_enabled := false
+## The hold note currently being held down, if any. Only one at a time: the
+## chart never overlaps holds, and one filter per layer is all PDJE exposes.
+var _held = null
 
 
 ## Start the song: SongData defines the layers, PdjeSong plays them through
@@ -122,7 +130,8 @@ func _load_song() -> AudioStream:
 	_chart_title = SongData.TITLE
 	_loop_length = SongData.loop_seconds()
 	_looping = true
-	_pattern = SongData.chart()
+	_holds_enabled = GameState.get_upgrade_level(&"hold_notes") > 0
+	_pattern = SongData.chart(_holds_enabled)
 
 	_song = PdjeSong.new()
 	_song.name = "PdjeSong"
@@ -152,6 +161,7 @@ func _retry_audio() -> void:
 		_song.stop()
 		_song.queue_free()
 		_song = null
+	_held = null
 	_audio_failed = false
 	# The chart keeps its own timeline; only the audio side restarts, so the run
 	# in progress is not disturbed beyond the song jumping back to its start.
@@ -173,6 +183,7 @@ func _for_each_active_free() -> void:
 		if note["node"]:
 			note["node"].queue_free()
 	_active.clear()
+	_held = null
 
 
 ## Reads a generated chart JSON and returns the AudioStream to play with it.
@@ -243,8 +254,11 @@ func _append_lap(lap: int) -> void:
 		_pending.append({
 			"time": n["time"] + offset,
 			"lane": n["lane"],
+			"hold": float(n.get("hold", 0.0)),
 			"node": null,
-			"hit": false,
+			"hit": false,       # head judged (or missed)
+			"holding": false,   # head hit and the key is still down
+			"done": false,      # fully resolved, safe to drop
 		})
 	_laps_generated = lap + 1
 
@@ -322,12 +336,19 @@ func _process(delta: float) -> void:
 	var window_good := WIN_GOOD + GameState.judge_window_bonus_ms / 1000.0
 	for i in range(_active.size() - 1, -1, -1):
 		var note = _active[i]
-		if not note["hit"]:
-			note["node"].position.y = \
-				HIT_Y - (float(note["time"]) - t) * px_per_sec - NOTE_HEIGHT / 2.0
-			if t - note["time"] > window_good:
+		if not note["done"]:
+			# A held note's body is still falling even though its head is judged,
+			# so position tracks the head until the whole note is resolved.
+			if note["node"] != null:
+				note["node"].position.y = HIT_Y \
+					- (float(note["time"]) - t) * px_per_sec \
+					- NOTE_HEIGHT / 2.0 - float(note.get("body_px", 0.0))
+			if not note["hit"] and t - note["time"] > window_good:
 				_register_miss(note)
-		if note["hit"]:
+			elif note["holding"] and t >= _tail_time(note):
+				# Held all the way to the tail: pay out and release the filter.
+				_finish_hold(note, true)
+		if note["done"]:
 			_active.remove_at(i)
 
 	if not _looping and not _finished and _pending.is_empty() and _active.is_empty():
@@ -336,7 +357,37 @@ func _process(delta: float) -> void:
 		_refresh_lap()
 
 	if _selftest_until > 0.0:
+		if _autoplay:
+			_tick_autoplay(t)
 		_tick_selftest(t)
+
+
+## `--autoplay` (with --selftest): press every note dead on time, holding hold
+## notes to their tail. Exercises the hold state machine, which selftest alone
+## never touches because it makes no input.
+func _tick_autoplay(t: float) -> void:
+	for note in _active.duplicate():
+		if note["done"]:
+			continue
+		var lane: int = note["lane"]
+		if not note["hit"]:
+			if t >= float(note["time"]):
+				_send_lane(lane, true)
+				# A tap needs the key back up, or the next note in that lane
+				# would never see a fresh press.
+				if float(note["hold"]) <= 0.0:
+					_send_lane(lane, false)
+		elif note["holding"] and t >= _tail_time(note):
+			_send_lane(lane, false)
+
+
+## Input.action_press() only sets the action state; it never reaches
+## _unhandled_input. A synthetic InputEventAction does.
+func _send_lane(lane: int, pressed: bool) -> void:
+	var ev := InputEventAction.new()
+	ev.action = "lane_%d" % lane
+	ev.pressed = pressed
+	Input.parse_input_event(ev)
 
 
 func _tick_selftest(t: float) -> void:
@@ -357,6 +408,9 @@ func _finish_selftest(reason: String) -> void:
 		Conductor.loops_completed + 1, notes_seen,
 		_pattern.size() * (Conductor.loops_completed + 1), misses,
 		_pending.size(), _active.size()])
+	if _autoplay:
+		print("autoplay: score=%d combo=%d/%d  holds completed=%d broken=%d" % [
+			score, combo, max_combo, holds_completed, holds_broken])
 	print("########## RhythmGame selftest done (%s) ##########" % reason)
 	# Tear down before quitting: queue_free() never runs if we quit mid-frame.
 	for note in _active:
@@ -373,10 +427,20 @@ func _spawn_note(note: Dictionary) -> void:
 	notes_seen += 1
 	var rect := ColorRect.new()
 	rect.color = LANE_COLORS[note["lane"]]
-	rect.size = Vector2(LANE_WIDTH - 16, NOTE_HEIGHT)
+	# A hold note is drawn as one tall block: the head sits at the bottom (it is
+	# what meets the hit line) with the body stretching back up the lane. The
+	# body height is cached so _process can keep positioning by the head.
+	var body := float(note["hold"]) * (HIT_Y - SPAWN_Y) / APPROACH_TIME
+	note["body_px"] = body
+	rect.size = Vector2(LANE_WIDTH - 16, NOTE_HEIGHT + body)
 	rect.position = Vector2(_playfield_x + note["lane"] * LANE_WIDTH + 8, SPAWN_Y)
 	add_child(rect)
 	note["node"] = rect
+
+
+## When a hold note's tail crosses the hit line.
+func _tail_time(note) -> float:
+	return float(note["time"]) + float(note["hold"])
 
 
 # --- Input & judgement -------------------------------------------------------
@@ -397,6 +461,8 @@ func _unhandled_input(event: InputEvent) -> void:
 	for lane in range(LANE_COUNT):
 		if event.is_action_pressed("lane_%d" % lane):
 			_judge_lane(lane)
+		elif event.is_action_released("lane_%d" % lane):
+			_release_lane(lane)
 
 
 func _judge_lane(lane: int) -> void:
@@ -405,7 +471,7 @@ func _judge_lane(lane: int) -> void:
 	var best = null
 	var best_dt := 1000.0
 	for note in _active:
-		if note["hit"] or note["lane"] != lane:
+		if note["hit"] or note["done"] or note["lane"] != lane:
 			continue
 		var dt: float = abs(note["time"] - t)
 		if dt < best_dt:
@@ -427,7 +493,16 @@ func _judge_lane(lane: int) -> void:
 
 func _register_hit(note, base_beats: int, label: String, col: Color) -> void:
 	note["hit"] = true
-	if note["node"]:
+	if float(note["hold"]) > 0.0:
+		# The head landed; the note is not finished until the tail. Keep it on
+		# screen and start filtering the layer for as long as the key is down.
+		note["holding"] = true
+		_held = note
+		if _song != null:
+			_song.set_layer_filter(SongData.HOLD_FILTER_LAYER, SongData.HOLD_FILTER_HZ)
+	else:
+		note["done"] = true
+	if note["node"] and note["done"]:
 		note["node"].queue_free()
 		note["node"] = null
 	combo += 1
@@ -440,8 +515,46 @@ func _register_hit(note, base_beats: int, label: String, col: Color) -> void:
 	_refresh_hud()
 
 
+## The key came up. Ends a hold — early counts as a break, at the tail as a hit.
+func _release_lane(lane: int) -> void:
+	if _held == null or int(_held["lane"]) != lane:
+		return
+	# The tail check in _process may not have run yet this frame, so allow the
+	# same window here rather than punishing a release that was in fact on time.
+	var window := WIN_GOOD + GameState.judge_window_bonus_ms / 1000.0
+	_finish_hold(_held, Conductor.song_position >= _tail_time(_held) - window)
+
+
+func _finish_hold(note, completed: bool) -> void:
+	note["holding"] = false
+	note["done"] = true
+	if note["node"]:
+		note["node"].queue_free()
+		note["node"] = null
+	if _held == note:
+		_held = null
+		if _song != null:
+			_song.set_layer_filter(SongData.HOLD_FILTER_LAYER, PdjeSong.FILTER_OPEN_HZ)
+	if completed:
+		holds_completed += 1
+		var earned := int(BEATS_PERFECT * GameState.score_multiplier)
+		score += earned * 10
+		beats_this_run += earned
+		GameState.add_beats(earned)
+		combo += 1
+		max_combo = max(max_combo, combo)
+		_flash_judge("HOLD!", Color("#c78bff"))
+	else:
+		holds_broken += 1
+		combo = 0
+		misses += 1
+		_flash_judge("BREAK", Color("#ff5964"))
+	_refresh_hud()
+
+
 func _register_miss(note) -> void:
 	note["hit"] = true
+	note["done"] = true
 	if note["node"]:
 		note["node"].queue_free()
 		note["node"] = null
@@ -488,7 +601,10 @@ func _end_run() -> void:
 	_finished = true
 	Conductor.stop()
 	if _song != null:
+		# Never leave the filter clamped shut on the way out.
+		_song.set_layer_filter(SongData.HOLD_FILTER_LAYER, PdjeSong.FILTER_OPEN_HZ)
 		_song.stop()
+	_held = null
 	for note in _active:
 		if note["node"]:
 			note["node"].queue_free()
