@@ -170,6 +170,15 @@ func _probe_fx(title: String) -> void:
 		return
 	_say("  FILTER arg keys = %s" % str(_fx_args.GetFXArgKeys(_fx_filter)))
 
+	# Is there a native pitch shifter anywhere in the FX set? Dump every FX's
+	# arg keys and look for anything pitch/key/semitone shaped — that would beat
+	# doing it offline.
+	_say("  -- all FX arg keys --")
+	for cname in names:
+		var v := ClassDB.class_get_integer_constant("EnumWrapper", cname)
+		var keys: Variant = _fx_args.GetFXArgKeys(v)
+		_say("    %-12s (%2d) %s" % [cname, v, str(keys)])
+
 
 ## HLswitch picks the filter type: the editor mix table lists HIGH(0)/LOW(2),
 ## so 2 is the lowpass we want for the hold mechanic.

@@ -229,12 +229,35 @@ COMPRESSOR DISTORTION ECHO EQ FILTER FLANGER OCSFILTER
 PANNER PHASER ROBOT ROLL TRANCE VOL
 ```
 
-`FILTER` の引数キーは `GetFXArgKeys()` の実測で **2つだけ**:
+`GetFXArgKeys()` で実測した**全FXの引数キー**（`pdje_audio_check.tscn -- --auto` で再取得可）:
+
+| FX | 値 | 引数キー |
+| --- | ---: | --- |
+| `COMPRESSOR` | 0 | `KneeDB` `Strength` `AttackMS` `ThreshDB` `ReleaseMS` |
+| `DISTORTION` | 1 | `DistortionValue` |
+| `ECHO` | 2 | `EchoDryWet` `EchoBps` `EchoFeedback` |
+| `EQ` | 3 | `EQLow` `EQHigh` `EQMid` |
+| `FILTER` | 4 | `HLswitch` `Filterfreq` |
+| `FLANGER` | 5 | `Bps` `FlangerDryWet` |
+| `OCSFILTER` | 6 | `OCSFilterHighLowSW` `MiddleFreq` `RangeFreqHalf` `Bps` `OCSFilterDryWet` |
+| `PANNER` | 7 | `Bps` `PGain` `PannerDryWet` |
+| `PHASER` | 8 | `Bps` `PhaserDryWet` |
+| `ROBOT` | 9 | `RobotFreq` `RobotDryWet` |
+| `ROLL` | 10 | `RollBpm` `RollPower` |
+| `TRANCE` | 11 | `Bps` `Gain` `TranceDryWet` |
+| `VOL` | 12 | `VolPower` |
+
+`FILTER` の使い分け:
 
 | キー | 意味 |
 | --- | --- |
-| `HLswitch` | フィルタ種別。`0` = ハイパス、`2` = ローパス（エディタ mix 表の `HIGH(0)/LOW(2)` と同じ規約） |
-| `Filterfreq` | カットオフ周波数（Hz） |
+| `HLswitch` | フィルタ種別。`0` = ハイパス、`2` = ローパス（エディタ mix 表の `HIGH(0)/LOW(2)` と同じ規約）。**実機でローパスを確認済み** |
+| `Filterfreq` | カットオフ周波数（Hz）。ロングノートでは 500Hz を使用 |
+
+> **【判明】ピッチシフト系のFXは存在しない。** `ROBOT` は `RobotFreq` を持つが
+> リングモッド系であって音楽的な移調ではない。**移調が必要な音源は、素材の段階で
+> キーを揃えておくこと。**（どうしても実行時にやるなら「リサンプル → `ChangeBpm`
+> で長さを戻す」で合成はできるが、素材を直すほうが音質・実装ともに勝る）
 
 使い方（`data/songs/pdje_song.gd::set_layer_filter()`）:
 
